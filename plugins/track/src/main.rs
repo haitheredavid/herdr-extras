@@ -24,7 +24,7 @@ const SNAPSHOT_EVERY: Duration = Duration::from_secs(5);
 const RETRY_EVERY: Duration = Duration::from_secs(2);
 const RESUBSCRIBE_AFTER_LOSS: Duration = Duration::from_secs(1);
 const REDRAW_EVERY: Duration = Duration::from_secs(1);
-const USAGE: &str = "usage: herdr-track [--popup] [--view time|sequence|area] [--orient h|v] | --dump [--width N --height N ...] | open split|popup | record";
+const USAGE: &str = "usage: herdr-track [--popup] [--view time|sequence|area|heat|dash] [--orient h|v] | --dump [--width N --height N ...] | open split|popup | record";
 
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
@@ -57,6 +57,8 @@ fn parse_opts(args: &[String]) -> anyhow::Result<Opts> {
                     "time" => ViewKind::Time,
                     "sequence" => ViewKind::Sequence,
                     "area" => ViewKind::Area,
+                    "heat" => ViewKind::Heat,
+                    "dash" => ViewKind::Dash,
                     v => bail!("unknown view {v:?}"),
                 }
             }

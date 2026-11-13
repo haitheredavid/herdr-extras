@@ -1,6 +1,8 @@
 //! Shared frame (header, detail, footer), lane layout for both orientations, glyphs and keys.
 
 mod area;
+mod dash;
+mod heat;
 mod sequence;
 mod time;
 
@@ -29,12 +31,34 @@ pub enum ViewKind {
     Sequence,
     /// Stacked context per agent over time.
     Area,
+    /// Working share per agent per time bucket.
+    Heat,
+    /// One table row per agent.
+    Dash,
 }
 
 impl ViewKind {
+    /// In `Tab` order; `1`-`5` pick by position.
+    const ALL: [ViewKind; 5] = [ViewKind::Time, ViewKind::Sequence, ViewKind::Area, ViewKind::Heat, ViewKind::Dash];
+
     /// Cells are time buckets: zoom and time scrolling apply.
     fn timed(self) -> bool {
-        matches!(self, ViewKind::Time | ViewKind::Area)
+        matches!(self, ViewKind::Time | ViewKind::Area | ViewKind::Heat)
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            ViewKind::Time => "TIME",
+            ViewKind::Sequence => "SEQUENCE",
+            ViewKind::Area => "AREA",
+            ViewKind::Heat => "HEAT",
+            ViewKind::Dash => "DASH",
+        }
+    }
+
+    fn next(self) -> ViewKind {
+        let i = ViewKind::ALL.iter().position(|&v| v == self).unwrap_or(0);
+        ViewKind::ALL[(i + 1) % ViewKind::ALL.len()]
     }
 }
 
@@ -121,7 +145,8 @@ impl App {
     }
 
     pub fn on_key(&mut self, key: KeyEvent) {
-        let horizontal = self.orient == Orient::Horizontal;
+        // DASH is a table in either orientation, so its lane keys stay j/k.
+        let horizontal = self.orient == Orient::Horizontal || self.view == ViewKind::Dash;
         let c = key.code;
         let (next, prev, back, fwd) = if horizontal {
             (
@@ -150,20 +175,25 @@ impl App {
         let step = (self.time_cells as i64 / 4).max(1) * self.bucket_ms();
         if back {
             match self.view {
-                ViewKind::Time | ViewKind::Area => {
+                ViewKind::Time | ViewKind::Area | ViewKind::Heat => {
                     if self.follow {
                         self.view_end_ms = self.now_ms;
                     }
                     self.view_end_ms -= step;
+                    self.follow = false;
                 }
-                ViewKind::Sequence => self.seq_back += 1,
+                ViewKind::Sequence => {
+                    self.seq_back += 1;
+                    self.follow = false;
+                }
+                ViewKind::Dash => {}
             }
-            self.follow = false;
             return;
         }
         if fwd {
             match self.view {
-                ViewKind::Time | ViewKind::Area => {
+                ViewKind::Dash => {}
+                ViewKind::Time | ViewKind::Area | ViewKind::Heat => {
                     self.view_end_ms += step;
                     if self.view_end_ms >= self.now_ms {
                         self.follow = true;
@@ -177,13 +207,8 @@ impl App {
             return;
         }
         match c {
-            KeyCode::Tab => {
-                self.view = match self.view {
-                    ViewKind::Time => ViewKind::Sequence,
-                    ViewKind::Sequence => ViewKind::Area,
-                    ViewKind::Area => ViewKind::Time,
-                }
-            }
+            KeyCode::Tab => self.view = self.view.next(),
+            KeyCode::Char(c @ '1'..='5') => self.view = ViewKind::ALL[c as usize - '1' as usize],
             KeyCode::Char('o') => {
                 self.orient = if horizontal { Orient::Vertical } else { Orient::Horizontal };
                 self.lane_scroll = 0;
@@ -248,6 +273,12 @@ fn viridis(t: f64) -> (u8, u8, u8) {
 fn series_rgb(k: usize, n: usize) -> (u8, u8, u8) {
     let t = if n <= 1 { 0.5 } else { k as f64 / (n - 1) as f64 };
     viridis(VIRIDIS_FROM + (1.0 - VIRIDIS_FROM) * t)
+}
+
+/// Viridis at `t` in 0..=1, the full range: for sequential scales such as HEAT's.
+pub fn viridis_color(t: f64) -> Color {
+    let (r, g, b) = viridis(t);
+    Color::Rgb(r, g, b)
 }
 
 pub fn series_color(k: usize, n: usize) -> Color {
@@ -577,6 +608,8 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
             ViewKind::Time => time::render(buf, body, app, &lanes, scale),
             ViewKind::Sequence => sequence::render(buf, body, app, &lanes, scale),
             ViewKind::Area => area::render(buf, body, app, &lanes),
+            ViewKind::Heat => heat::render(buf, body, app, &lanes),
+            ViewKind::Dash => dash::render(buf, body, app, &lanes),
         }
     }
 
@@ -585,11 +618,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
         Span::styled("track", Style::new().add_modifier(Modifier::BOLD)),
         Span::raw(" · "),
         Span::styled(
-            match app.view {
-                ViewKind::Time => "TIME",
-                ViewKind::Sequence => "SEQUENCE",
-                ViewKind::Area => "AREA",
-            },
+            app.view.name(),
             Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
         ),
         Span::raw(if horizontal { " · ↔" } else { " · ↕" }),
@@ -600,7 +629,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
     } else if app.view.timed() {
         spans.push(Span::raw(format!(" · bucket {}", fmt_bucket(BUCKETS_S[app.bucket_idx]))));
     }
-    if scale.band > 1 && app.view != ViewKind::Area {
+    if scale.band > 1 && matches!(app.view, ViewKind::Time | ViewKind::Sequence) {
         spans.push(Span::raw(format!(" · ctx ≤ {}", fmt_tokens(scale.max))));
     }
     spans.push(Span::raw(format!(" · follow {}", if app.follow { '●' } else { '○' })));
@@ -634,21 +663,22 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
         render_line(Line::from(vec![Span::styled(glyph.to_string(), Style::new().fg(color)), Span::raw(text)]), detail, buf);
     }
 
-    let (other, flip, lane_keys, scroll_keys) = (
-        match app.view {
-            ViewKind::Time => "sequence",
-            ViewKind::Sequence => "area",
-            ViewKind::Area => "time",
-        },
-        if horizontal { "vertical" } else { "horizontal" },
-        if horizontal { "j/k" } else { "h/l" },
-        if horizontal { "h/l" } else { "j/k" },
-    );
-    let zoom = if app.view.timed() { " · +/- zoom" } else { "" };
-    let usage = if app.view == ViewKind::Area { " · s stack" } else { " · u usage" };
-    let help = format!(
-        "Tab {other} · o {flip} · {lane_keys} agent · {scroll_keys} scroll{zoom}{usage} · f follow · enter jump · r refresh · q quit"
-    );
+    let next = app.view.next().name().to_lowercase();
+    let help = if app.view == ViewKind::Dash {
+        format!("Tab {next} · 1-5 view · j/k agent · enter jump · r refresh · q quit")
+    } else {
+        let flip = if horizontal { "vertical" } else { "horizontal" };
+        let (lane_keys, scroll_keys) = if horizontal { ("j/k", "h/l") } else { ("h/l", "j/k") };
+        let zoom = if app.view.timed() { " · +/- zoom" } else { "" };
+        let extra = match app.view {
+            ViewKind::Area => " · s stack",
+            ViewKind::Time | ViewKind::Sequence => " · u usage",
+            ViewKind::Heat | ViewKind::Dash => "",
+        };
+        format!(
+            "Tab {next} · 1-5 view · o {flip} · {lane_keys} agent · {scroll_keys} scroll{zoom}{extra} · f follow · enter jump · r refresh · q quit"
+        )
+    };
     render_line(Line::styled(help, dim), footer, buf);
 }
 

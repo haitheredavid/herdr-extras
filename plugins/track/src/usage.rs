@@ -8,11 +8,13 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Sample {
     pub at_ms: i64,
     /// Context tokens in use at this turn.
     pub ctx: u64,
+    /// Dollar cost of this request.
+    pub cost: f64,
 }
 
 /// One session file, read incrementally: only bytes appended since the last refresh are parsed.
@@ -42,7 +44,8 @@ fn parse_sample(line: &str) -> Option<Sample> {
     let usage = v.pointer("/message/usage")?;
     let n = |k: &str| usage.get(k).and_then(Value::as_u64).unwrap_or(0);
     let at_ms = chrono::DateTime::parse_from_rfc3339(v.get("timestamp")?.as_str()?).ok()?.timestamp_millis();
-    Some(Sample { at_ms, ctx: n("input") + n("cacheRead") + n("cacheWrite") })
+    let cost = usage.pointer("/cost/total").and_then(Value::as_f64).unwrap_or(0.0);
+    Some(Sample { at_ms, ctx: n("input") + n("cacheRead") + n("cacheWrite"), cost })
 }
 
 impl Tail {
@@ -100,6 +103,13 @@ impl Tracker {
             .map(|s| s.ctx)
     }
 
+    /// Requests and their total cost in `[from_ms, to_ms]` across the lane's sessions.
+    pub fn spend_between(&self, sessions: &[PathBuf], from_ms: i64, to_ms: i64) -> (usize, f64) {
+        self.samples(sessions)
+            .flat_map(|s| s.iter().filter(|x| x.at_ms >= from_ms && x.at_ms <= to_ms))
+            .fold((0, 0.0), |(n, c), s| (n + 1, c + s.cost))
+    }
+
     /// Largest context in `[from_ms, to_ms]`, counting the value already in effect at `from_ms`.
     pub fn max_between(&self, sessions: &[PathBuf], from_ms: i64, to_ms: i64) -> Option<u64> {
         let inside = self
@@ -127,7 +137,7 @@ pub(crate) mod tests {
 
     pub fn assistant(ts: &str, input: u64, cache_read: u64, cache_write: u64) -> String {
         format!(
-            r#"{{"type":"message","timestamp":"{ts}","message":{{"role":"assistant","usage":{{"input":{input},"output":9,"cacheRead":{cache_read},"cacheWrite":{cache_write}}}}}}}"#
+            r#"{{"type":"message","timestamp":"{ts}","message":{{"role":"assistant","usage":{{"input":{input},"output":9,"cacheRead":{cache_read},"cacheWrite":{cache_write},"cost":{{"total":0.25}}}}}}}}"#
         )
     }
 
@@ -135,6 +145,7 @@ pub(crate) mod tests {
     fn parses_assistant_usage_only() {
         let s = parse_sample(&assistant("2026-11-13T00:00:01.000Z", 2, 300, 10)).unwrap();
         assert_eq!(s.ctx, 312);
+        assert_eq!(s.cost, 0.25);
         assert_eq!(s.at_ms, chrono::DateTime::parse_from_rfc3339("2026-11-13T00:00:01Z").unwrap().timestamp_millis());
         let user = r#"{"type":"message","timestamp":"2026-11-13T00:00:01Z","message":{"role":"user","usage":{"input":1}}}"#;
         assert_eq!(parse_sample(user), None);
@@ -163,6 +174,7 @@ pub(crate) mod tests {
         assert_eq!(t.ctx_at(&sessions, t1 + 4000), Some(400));
         assert_eq!(t.max_between(&sessions, t1 + 1000, t1 + 3000), Some(100), "value in effect counts");
         assert_eq!(t.max_between(&sessions, t1, t1 + 9000), Some(400));
+        assert_eq!(t.spend_between(&sessions, t1, t1 + 9000), (2, 0.5));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

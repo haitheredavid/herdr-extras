@@ -170,6 +170,36 @@ pub fn status_at(lane: &Lane, t_ms: i64) -> Option<AgentStatus> {
     lane.steps.iter().take_while(|s| s.at_ms <= t_ms).last().map(|s| s.status)
 }
 
+/// Time a lane spent in each status within a window.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StatusTime {
+    pub working_ms: i64,
+    pub blocked_ms: i64,
+    /// Time the lane was open at all within the window.
+    pub alive_ms: i64,
+}
+
+/// How `lane` spent `[from_ms, to_ms)`: each step's status holds until the next step, the lane's
+/// close, or `to_ms`.
+pub fn status_time(lane: &Lane, from_ms: i64, to_ms: i64) -> StatusTime {
+    let end = lane.closed_ms.unwrap_or(i64::MAX).min(to_ms);
+    let mut out = StatusTime::default();
+    for (i, step) in lane.steps.iter().enumerate() {
+        let next = lane.steps.get(i + 1).map_or(end, |s| s.at_ms.min(end));
+        let span = (next.min(end) - step.at_ms.max(from_ms)).max(0);
+        if span == 0 {
+            continue;
+        }
+        out.alive_ms += span;
+        match step.status {
+            AgentStatus::Working => out.working_ms += span,
+            AgentStatus::Blocked => out.blocked_ms += span,
+            _ => {}
+        }
+    }
+    out
+}
+
 #[derive(Debug, Default)]
 pub struct State {
     pub lanes: Vec<Lane>,
@@ -588,6 +618,19 @@ mod tests {
         assert_eq!(s.lanes.len(), 1);
         assert_eq!((s.lanes[0].pane_id.as_str(), s.lanes[0].workspace_id.as_str()), ("w2:p4", "w2"));
         assert_eq!(s.lanes[0].agent.as_deref(), Some("omp"));
+    }
+
+    #[test]
+    fn status_time_splits_a_window_by_status() {
+        let mut s = State::default();
+        let i = s.open("p1", "w1", 0, Mark::Created, AgentStatus::Idle, true);
+        s.set_status(i, AgentStatus::Working, 100);
+        s.set_status(i, AgentStatus::Blocked, 300);
+        s.close("p1", Mark::Closed, 400);
+        let l = &s.lanes[0];
+        assert_eq!(status_time(l, 0, 1000), StatusTime { working_ms: 200, blocked_ms: 100, alive_ms: 400 });
+        assert_eq!(status_time(l, 150, 350), StatusTime { working_ms: 150, blocked_ms: 50, alive_ms: 200 });
+        assert_eq!(status_time(l, 500, 600), StatusTime::default(), "after close");
     }
 
     #[test]

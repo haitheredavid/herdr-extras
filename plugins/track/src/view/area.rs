@@ -409,7 +409,7 @@ mod tests {
         for (li, ctx) in [(0, 100), (i, 300)] {
             let path = PathBuf::from(format!("/s{li}.jsonl"));
             app.state.lanes[li].sessions.push(path.clone());
-            app.usage.insert(path, vec![Sample { at_ms: 0, ctx }]);
+            app.usage.insert(path, vec![Sample { at_ms: 0, ctx, cost: 0.0 }]);
         }
         app
     }

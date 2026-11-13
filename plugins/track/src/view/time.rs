@@ -127,7 +127,7 @@ mod tests {
         let mut app = sample_app(ViewKind::Time, orient);
         let path = std::path::PathBuf::from("/s.jsonl");
         app.state.lanes[0].sessions.push(path.clone());
-        app.usage.insert(path, vec![Sample { at_ms: 0, ctx: 100 }, Sample { at_ms: 4000, ctx: 400 }]);
+        app.usage.insert(path, vec![Sample { at_ms: 0, ctx: 100, cost: 0.0 }, Sample { at_ms: 4000, ctx: 400, cost: 0.0 }]);
         app
     }
 

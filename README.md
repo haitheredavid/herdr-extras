@@ -30,7 +30,7 @@ track · TIME · ↔ · 2 agents · bucket 15s · follow ●
 
 Actions `herdr-extras.track.open` (a 14-row band below the focused pane, full width in a single-pane tab) and `herdr-extras.track.open-popup`.
 
-- **Views** (`Tab`): TIME draws one cell per time bucket, so line length is wall-clock duration. SEQUENCE draws one evenly spaced node per state change, so every lane starts at the near edge. AREA is an area chart of each agent's context in use: a braille line per agent over a tinted fill, colored along viridis (blue-purple at the base to yellow on top, spread by agent count; the darkest purples are skipped for dark terminals), stacked so the top line is the total (`s` overlays them from zero instead: largest behind, overlapping fills blended so each shows through). It has a value axis with round ticks, a legend, and a label with the current context at each line's end. While following it fits the last 2 h of session history across the axis (`fit` in the header); `+/-` switch to TIME's buckets and `f` fits again.
+- **Views** (`Tab` cycles, `1`-`5` jump: TIME, SEQUENCE, AREA, HEAT, DASH): TIME draws one cell per time bucket, so line length is wall-clock duration. SEQUENCE draws one evenly spaced node per state change, so every lane starts at the near edge. HEAT gives each agent a row of time buckets shaded along viridis by the share of the bucket spent working (red if blocked at all), with TIME's zoom and scrolling. DASH is a table, one row per agent over the last 2 h: context sparkline in the agent's color, current context, working share, cost, requests and current state. AREA is an area chart of each agent's context in use: a braille line per agent over a tinted fill, colored along viridis (blue-purple at the base to yellow on top, spread by agent count; the darkest purples are skipped for dark terminals), stacked so the top line is the total (`s` overlays them from zero instead: largest behind, overlapping fills blended so each shows through). It has a value axis with round ticks, a legend, and a label with the current context at each line's end. While following it fits the last 2 h of session history across the axis (`fit` in the header); `+/-` switch to TIME's buckets and `f` fits again.
 - **Orientations** (`o`): ↔ lanes are rows with time flowing right; ↕ lanes are columns with time flowing down.
 - **Usage bands** (`u` toggles): for omp agents, each lane is a 4-cell band and the line sits across it by context in use (input + cache tokens of the latest turn, read from the session file herdr reports for the pane), so it climbs as the conversation grows and drops on compaction. The scale is shared across visible lanes (`ctx ≤ 320k` in the header), and each lane's current context shows under its label. Without usage data lanes stay one cell thick.
 - **Keys** follow the orientation. The lane keys are `j/k` in ↔ and `h/l` in ↕, and the other pair scrolls along time. In TIME, `+/-` zoom through 1s, 5s, 15s, 1m and 5m buckets. `f` returns to following now, `Enter` focuses the selected agent's pane, `u` toggles usage bands, `r` re-snapshots and `q` quits (`Esc` also quits in the popup).
@@ -43,7 +43,7 @@ Actions `herdr-extras.track.open` (a 14-row band below the focused pane, full wi
 cd plugins/track
 cargo test
 cargo build --release
-./target/release/herdr-track --dump --width 120 --height 20 [--view sequence|area] [--orient v]
+./target/release/herdr-track --dump --width 120 --height 20 [--view sequence|area|heat|dash] [--orient v]
 ```
 
 `--dump` renders one frame against the running herdr to stdout.
