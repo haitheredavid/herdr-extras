@@ -5,14 +5,16 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
 
-use super::{App, Cell, Grid, Orient, head_cell, line_cell, node_glyph};
+use super::{App, Grid, Orient, Pt, Scale, head_cell, line_cell, node_glyph};
 use crate::model::Lane;
+use crate::usage::Tracker;
 
 /// Cells per step: the node, then connectors in the status it set.
 const STEP_W: usize = 4;
 const STEP_H: usize = 2;
 
-fn cells(lane: &Lane, n: usize, seq_back: usize, orient: Orient) -> Vec<Cell> {
+/// Step k's node and connectors sit at the context in use when it happened; the head at now's.
+fn pts(lane: &Lane, usage: &Tracker, scale: Scale, now_ms: i64, n: usize, seq_back: usize, orient: Orient) -> Vec<Pt> {
     let step = match orient {
         Orient::Horizontal => STEP_W,
         Orient::Vertical => STEP_H,
@@ -29,27 +31,30 @@ fn cells(lane: &Lane, n: usize, seq_back: usize, orient: Orient) -> Vec<Cell> {
     let need = |s: usize| (s..end).map(width).sum::<usize>() + usize::from(head) + usize::from(s > 0);
     let first = (0..end).find(|&s| need(s) <= n).unwrap_or(end - 1);
 
-    let mut out: Vec<Cell> = Vec::with_capacity(n);
+    let level_at = |t_ms: i64| scale.level(usage.ctx_at(&lane.sessions, t_ms));
+    let mut out: Vec<Pt> = Vec::with_capacity(n);
     if first > 0 {
-        out.push(Some(('…', Color::DarkGray)));
+        let s = &lane.steps[first];
+        out.push(Pt { cell: Some(('…', Color::DarkGray)), level: level_at(s.at_ms), status: Some(s.status) });
     }
     for k in first..end {
         let s = &lane.steps[k];
-        out.push(Some(node_glyph(s.mark)));
+        let (level, status) = (level_at(s.at_ms), Some(s.status));
+        out.push(Pt { cell: Some(node_glyph(s.mark)), level, status });
         if width(k) > 1 {
-            out.extend(std::iter::repeat_n(line_cell(s.status, orient), step - 1));
+            out.extend(std::iter::repeat_n(Pt { cell: line_cell(s.status, orient), level, status }, step - 1));
         }
     }
     if head {
-        out.push(head_cell(lane.status, orient));
+        out.push(Pt { cell: head_cell(lane.status, orient), level: level_at(now_ms), status: Some(lane.status) });
     }
     out
 }
 
-pub fn render(buf: &mut Buffer, body: Rect, app: &mut App, lanes: &[usize]) {
-    let grid = Grid { orient: app.orient, body, lead: 0 };
-    let (back, orient) = (app.seq_back, app.orient);
-    grid.draw_lanes(buf, app, lanes, |lane, n| cells(lane, n, back, orient));
+pub fn render(buf: &mut Buffer, body: Rect, app: &mut App, lanes: &[usize], scale: Scale) {
+    let grid = Grid { orient: app.orient, body, lead: 0, band: scale.band };
+    let (back, orient, now) = (app.seq_back, app.orient, app.now_ms);
+    grid.draw_lanes(buf, app, lanes, |lane, usage, n| pts(lane, usage, scale, now, n, back, orient));
 }
 
 #[cfg(test)]

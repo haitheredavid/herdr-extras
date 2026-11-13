@@ -2,6 +2,7 @@
 //! from the history log, snapshots and live events.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -34,6 +35,17 @@ pub struct PaneInfo {
     pub cwd: Option<String>,
     #[serde(default)]
     pub agent_status: AgentStatus,
+    #[serde(default)]
+    pub agent_session: Option<AgentSession>,
+}
+
+/// Agent session identity herdr reports; omp reports `kind = "path"` with its session JSONL.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct AgentSession {
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub value: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -118,6 +130,8 @@ pub struct Lane {
     pub live: bool,
     /// First is Seen|Created; Status steps only on change; Closed|Exited last.
     pub steps: Vec<Step>,
+    /// Agent session files seen for this pane, oldest first; usage history comes from these.
+    pub sessions: Vec<PathBuf>,
 }
 
 impl Lane {
@@ -234,6 +248,7 @@ impl State {
             closed_ms: None,
             live,
             steps: vec![Step { at_ms, mark, status }],
+            sessions: Vec::new(),
         });
         self.lanes.len() - 1
     }
@@ -325,6 +340,12 @@ impl State {
         }
         if p.agent.is_some() {
             lane.agent = p.agent.clone();
+        }
+        if let Some(s) = p.agent_session.as_ref().filter(|s| s.kind == "path" && !s.value.is_empty()) {
+            let path = PathBuf::from(&s.value);
+            if !lane.sessions.contains(&path) {
+                lane.sessions.push(path);
+            }
         }
         self.set_status(i, p.agent_status, now_ms);
     }
@@ -505,7 +526,8 @@ mod tests {
             "panes": [
                 {"pane_id": "p2", "workspace_id": "w1", "agent": "omp", "agent_status": "idle"},
                 {"pane_id": "p3", "workspace_id": "w1", "agent": "omp", "agent_status": "working",
-                 "terminal_title_stripped": "π ⠇ fix login"},
+                 "terminal_title_stripped": "π ⠇ fix login",
+                 "agent_session": {"kind": "path", "value": "/s/a.jsonl"}},
             ],
         }))
         .unwrap();
@@ -523,6 +545,7 @@ mod tests {
         assert!(p3.live && p3.is_open());
         assert_eq!(p3.steps.last().unwrap(), &Step { at_ms: 1000, mark: Mark::Status(Working), status: Working });
         assert_eq!(p3.label(), "fix login");
+        assert_eq!(p3.sessions, [PathBuf::from("/s/a.jsonl")]);
         assert_eq!(s.open_live_ids().into_iter().collect::<Vec<_>>(), ["p2", "p3"]);
     }
 

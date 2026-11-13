@@ -3,6 +3,7 @@ mod history;
 mod model;
 mod open;
 mod record;
+mod usage;
 mod view;
 
 use std::collections::BTreeSet;
@@ -105,6 +106,7 @@ fn refresh(app: &mut App) -> bool {
     match herdr::snapshot() {
         Ok(snap) => {
             app.state.apply_snapshot(&snap, now_ms());
+            app.refresh_usage();
             app.error = None;
             app.connected = true;
             true
@@ -201,6 +203,7 @@ fn run_tui(o: &Opts) -> anyhow::Result<()> {
                     }
                     Msg::Event(g, env) if g == generation => {
                         app.state.apply_envelope(&env, now_ms());
+                        app.refresh_usage();
                         dirty = true;
                     }
                     Msg::Lost(g) if g == generation => {

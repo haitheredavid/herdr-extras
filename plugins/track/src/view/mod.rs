@@ -12,12 +12,15 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
 use crate::model::{AgentStatus, Lane, Mark, State};
+use crate::usage::{Tracker, fmt_tokens};
 
 pub const BUCKETS_S: [i64; 5] = [1, 5, 15, 60, 300];
 /// Horizontal lane gutter: status glyph, label, workspace.
 const GUTTER: u16 = 22;
 /// Vertical lane column width.
 const COL_W: u16 = 6;
+/// Cells across a lane when usage bands are drawn; the line sits higher the more context is in use.
+const BAND: u16 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewKind {
@@ -56,6 +59,9 @@ pub struct App {
     pub refresh_requested: bool,
     /// Pane the user asked to jump to; the event loop sends `pane.focus`.
     pub focus_requested: Option<String>,
+    /// Draw lanes as usage bands when any lane has usage.
+    pub bands: bool,
+    pub usage: Tracker,
 }
 
 impl App {
@@ -78,7 +84,15 @@ impl App {
             quit: false,
             refresh_requested: false,
             focus_requested: None,
+            bands: true,
+            usage: Tracker::default(),
         }
+    }
+
+    /// Reads new usage from every lane's agent session files.
+    pub fn refresh_usage(&mut self) {
+        let App { state, usage, .. } = self;
+        usage.refresh(state.lanes.iter().flat_map(|l| &l.sessions));
     }
 
     fn bucket_ms(&self) -> i64 {
@@ -160,6 +174,10 @@ impl App {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Esc if self.popup => self.quit = true,
             KeyCode::Char('r') => self.refresh_requested = true,
+            KeyCode::Char('u') => {
+                self.bands = !self.bands;
+                self.lane_scroll = 0;
+            }
             KeyCode::Enter => self.focus_requested = self.selected_lane().map(|i| self.state.lanes[i].pane_id.clone()),
             KeyCode::Char('f') => {
                 self.follow = true;
@@ -214,6 +232,63 @@ fn head_glyph(orient: Orient) -> char {
 
 /// One cell along a lane's time axis.
 type Cell = Option<(char, Color)>;
+
+/// One position along a lane: what to draw, how far across the band it sits (0 = least context),
+/// and the status of the line through it, which styles any bend into it.
+#[derive(Debug, Clone, Copy)]
+struct Pt {
+    cell: Cell,
+    level: u8,
+    status: Option<AgentStatus>,
+}
+
+/// Maps context tokens to a level across the band, against the largest context on screen.
+#[derive(Debug, Clone, Copy)]
+struct Scale {
+    band: u16,
+    max: u64,
+}
+
+impl Scale {
+    fn of(app: &App, lanes: &[usize]) -> Scale {
+        let max = lanes
+            .iter()
+            .filter_map(|&i| {
+                let l = &app.state.lanes[i];
+                app.usage.max_between(&l.sessions, l.opened_ms, l.closed_ms.unwrap_or(app.now_ms))
+            })
+            .max()
+            .unwrap_or(0);
+        Scale { band: if app.bands && max > 0 { BAND } else { 1 }, max }
+    }
+
+    fn level(self, ctx: Option<u64>) -> u8 {
+        if self.band <= 1 || self.max == 0 {
+            return 0;
+        }
+        let top = u64::from(self.band - 1);
+        ((ctx.unwrap_or(0).min(self.max) * top + self.max / 2) / self.max) as u8
+    }
+}
+
+fn is_line(ch: char) -> bool {
+    matches!(ch, '━' | '─' | '┈' | '┃' | '│' | '┆')
+}
+
+/// Corner at the old level, run between, corner at the new level, for a line stepping across the
+/// band; `up` means toward more context (up in ↔, right in ↕).
+fn bend(orient: Orient, up: bool, heavy: bool) -> (char, char, char) {
+    match (orient, up, heavy) {
+        (Orient::Horizontal, true, false) => ('┘', '│', '┌'),
+        (Orient::Horizontal, true, true) => ('┛', '┃', '┏'),
+        (Orient::Horizontal, false, false) => ('┐', '│', '└'),
+        (Orient::Horizontal, false, true) => ('┓', '┃', '┗'),
+        (Orient::Vertical, true, false) => ('└', '─', '┐'),
+        (Orient::Vertical, true, true) => ('┗', '━', '┓'),
+        (Orient::Vertical, false, false) => ('┘', '─', '┌'),
+        (Orient::Vertical, false, true) => ('┛', '━', '┏'),
+    }
+}
 
 fn line_cell(s: AgentStatus, orient: Orient) -> Cell {
     Some((line_glyph(s, orient), status_color(s)))
@@ -278,11 +353,13 @@ fn fmt_dur(ms: i64) -> String {
 }
 
 /// Lane placement in the body. `lead` is what precedes the lanes across the time axis: the axis
-/// row (horizontal time view) or the axis gutter (vertical time view).
+/// row (horizontal time view) or the axis gutter (vertical time view). `band` is each lane's
+/// thickness; bands are separated by a blank row in ↔ (columns already have a spare cell in ↕).
 struct Grid {
     orient: Orient,
     body: Rect,
     lead: u16,
+    band: u16,
 }
 
 impl Grid {
@@ -294,19 +371,36 @@ impl Grid {
         }
     }
 
+    fn gap(&self) -> u16 {
+        u16::from(self.band > 1)
+    }
+
     /// Lanes that fit side by side.
     fn slots(&self) -> usize {
         match self.orient {
-            Orient::Horizontal => self.body.height.saturating_sub(self.lead) as usize,
+            Orient::Horizontal => {
+                ((self.body.height.saturating_sub(self.lead) + self.gap()) / (self.band + self.gap())) as usize
+            }
             Orient::Vertical => (self.body.width.saturating_sub(self.lead) / COL_W) as usize,
         }
     }
 
-    fn cell_pos(&self, slot: usize, i: usize) -> (u16, u16) {
-        let (x, y) = (self.body.x, self.body.y);
+    /// First row (↔) or column (↕) of lane `slot`.
+    fn lane_start(&self, slot: usize) -> u16 {
         match self.orient {
-            Orient::Horizontal => (x + GUTTER + i as u16, y + self.lead + slot as u16),
-            Orient::Vertical => (x + self.lead + slot as u16 * COL_W + 2, y + 1 + i as u16),
+            Orient::Horizontal => self.body.y + self.lead + slot as u16 * (self.band + self.gap()),
+            Orient::Vertical => self.body.x + self.lead + slot as u16 * COL_W,
+        }
+    }
+
+    fn cell_pos(&self, slot: usize, i: usize, level: u8) -> (u16, u16) {
+        let start = self.lane_start(slot);
+        match self.orient {
+            Orient::Horizontal => (self.body.x + GUTTER + i as u16, start + (self.band - 1 - u16::from(level))),
+            Orient::Vertical => {
+                let across = if self.band > 1 { 1 + u16::from(level) } else { 2 };
+                (start + across, self.body.y + 1 + i as u16)
+            }
         }
     }
 
@@ -318,8 +412,15 @@ impl Grid {
         }
     }
 
-    /// Draws each lane's label and its cells, scrolling so the selected lane stays in view.
-    fn draw_lanes(&self, buf: &mut Buffer, app: &mut App, lanes: &[usize], cells: impl Fn(&Lane, usize) -> Vec<Cell>) {
+    fn put(&self, buf: &mut Buffer, (x, y): (u16, u16), ch: char, color: Color) {
+        if x < self.body.right() && y < self.body.bottom() {
+            buf[(x, y)].set_char(ch).set_style(Style::new().fg(color));
+        }
+    }
+
+    /// Draws each lane's label and its line, scrolling so the selected lane stays in view. Where
+    /// the level changes between cells, the line bends across the band in the new cell.
+    fn draw_lanes(&self, buf: &mut Buffer, app: &mut App, lanes: &[usize], pts: impl Fn(&Lane, &Tracker, usize) -> Vec<Pt>) {
         let slots = self.slots();
         let sel = app.selected;
         if sel < app.lane_scroll {
@@ -337,7 +438,7 @@ impl Grid {
             }
             match self.orient {
                 Orient::Horizontal => {
-                    let (x, y) = (self.body.x, self.cell_pos(slot, 0).1);
+                    let (x, y) = (self.body.x, self.lane_start(slot));
                     if k == sel {
                         for cx in x..(x + GUTTER.min(self.body.width)) {
                             buf[(cx, y)].set_style(Style::new().add_modifier(Modifier::REVERSED));
@@ -348,18 +449,40 @@ impl Grid {
                     put_str(buf, self.body, x + 2, y, &truncate(lane.label(), 13), label_style);
                     let ws = truncate(app.state.workspace_label(li), 6);
                     put_str(buf, self.body, x + 16, y, &ws, dim.patch(label_style));
+                    if self.band > 1
+                        && let Some(ctx) = app.usage.ctx_at(&lane.sessions, lane.closed_ms.unwrap_or(app.now_ms))
+                    {
+                        put_str(buf, self.body, x + 2, y + 1, &format!("{} ctx", fmt_tokens(ctx)), dim);
+                    }
                 }
                 Orient::Vertical => {
-                    let x = self.body.x + self.lead + slot as u16 * COL_W;
+                    let x = self.lane_start(slot);
                     put_str(buf, self.body, x, self.body.y, &format!("{:<5}", truncate(lane.label(), 5)), label_style);
                 }
             }
-            for (i, cell) in cells(lane, n).into_iter().enumerate().take(n) {
-                let Some((ch, color)) = cell else { continue };
-                let (x, y) = self.cell_pos(slot, i);
-                if x < self.body.right() && y < self.body.bottom() {
-                    buf[(x, y)].set_char(ch).set_style(Style::new().fg(color));
+            let mut prev: Option<u8> = None;
+            for (i, pt) in pts(lane, &app.usage, n).into_iter().enumerate().take(n) {
+                let Some((mut ch, mut color)) = pt.cell else {
+                    prev = None;
+                    continue;
+                };
+                if let Some(p) = prev
+                    && p != pt.level
+                {
+                    let s = pt.status.unwrap_or_default();
+                    let heavy = matches!(s, AgentStatus::Working | AgentStatus::Blocked | AgentStatus::Done);
+                    let c = status_color(s);
+                    let (from, mid, to) = bend(self.orient, pt.level > p, heavy);
+                    self.put(buf, self.cell_pos(slot, i, p), from, c);
+                    for l in p.min(pt.level) + 1..p.max(pt.level) {
+                        self.put(buf, self.cell_pos(slot, i, l), mid, c);
+                    }
+                    if is_line(ch) {
+                        (ch, color) = (to, c);
+                    }
                 }
+                self.put(buf, self.cell_pos(slot, i, pt.level), ch, color);
+                prev = Some(pt.level);
             }
         }
     }
@@ -380,12 +503,13 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
         app.view_end_ms = app.now_ms;
     }
 
+    let scale = Scale::of(app, &lanes);
     if lanes.is_empty() {
         put_str(buf, body, body.x, body.y, "no agents yet — start one in a herdr pane", dim);
     } else {
         match app.view {
-            ViewKind::Time => time::render(buf, body, app, &lanes),
-            ViewKind::Sequence => sequence::render(buf, body, app, &lanes),
+            ViewKind::Time => time::render(buf, body, app, &lanes, scale),
+            ViewKind::Sequence => sequence::render(buf, body, app, &lanes, scale),
         }
     }
 
@@ -406,6 +530,9 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
     if app.view == ViewKind::Time {
         spans.push(Span::raw(format!(" · bucket {}", fmt_bucket(BUCKETS_S[app.bucket_idx]))));
     }
+    if scale.band > 1 {
+        spans.push(Span::raw(format!(" · ctx ≤ {}", fmt_tokens(scale.max))));
+    }
     spans.push(Span::raw(format!(" · follow {}", if app.follow { '●' } else { '○' })));
     if let Some(err) = &app.error {
         spans.push(Span::styled(format!(" · herdr socket unavailable: {err} — retrying"), Style::new().fg(Color::Red)));
@@ -420,8 +547,13 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
             None => format!(" {}", fmt_dur(app.now_ms - lane.last_ms())),
             Some(c) => format!(" closed {}", hms(c)),
         };
+        let ctx = app
+            .usage
+            .ctx_at(&lane.sessions, lane.closed_ms.unwrap_or(app.now_ms))
+            .map(|c| format!(" · {} ctx", fmt_tokens(c)))
+            .unwrap_or_default();
         let text = format!(
-            " {} · {} · {} · {}{when} · {} steps · {}",
+            " {} · {} · {} · {}{when}{ctx} · {} steps · {}",
             lane.label(),
             app.state.workspace_label(li),
             lane.agent.as_deref().unwrap_or("-"),
@@ -443,7 +575,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
     );
     let zoom = if app.view == ViewKind::Time { " · +/- zoom" } else { "" };
     let help = format!(
-        "Tab {other} · o {flip} · {lane_keys} agent · {scroll_keys} scroll{zoom} · f follow · enter jump · r refresh · q quit"
+        "Tab {other} · o {flip} · {lane_keys} agent · {scroll_keys} scroll{zoom} · u usage · f follow · enter jump · r refresh · q quit"
     );
     render_line(Line::styled(help, dim), footer, buf);
 }
