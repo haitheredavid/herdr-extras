@@ -32,10 +32,21 @@ fn line_color(k: usize) -> Color {
     Color::Rgb(r, g, b)
 }
 
+/// Fill where the series `ks` cover a cell, back to front: each lays a 30% tint of its color over
+/// what is behind it, so overlapping areas show through each other.
+fn fill(ks: impl IntoIterator<Item = usize>) -> Option<Color> {
+    let mix = |behind: u8, c: u8| ((u16::from(c) * 3 + u16::from(behind) * 7) / 10) as u8;
+    let mut out = None;
+    for k in ks {
+        let (r, g, b) = series_rgb(k);
+        let (br, bgr, bb) = out.unwrap_or(BG);
+        out = Some((mix(br, r), mix(bgr, g), mix(bb, b)));
+    }
+    out.map(|(r, g, b)| Color::Rgb(r, g, b))
+}
+
 fn fill_color(k: usize) -> Color {
-    let (r, g, b) = series_rgb(k);
-    let mix = |c: u8, bg: u8| ((u16::from(c) * 3 + u16::from(bg) * 7) / 10) as u8;
-    Color::Rgb(mix(r, BG.0), mix(g, BG.1), mix(b, BG.2))
+    fill([k]).unwrap_or(Color::Reset)
 }
 
 /// Smallest 1, 1.5, 2, 2.5, 3, 4, 5, 6 or 8 × 10ⁿ at or above `v`.
@@ -248,14 +259,17 @@ pub fn render(buf: &mut Buffer, body: Rect, app: &mut App, lanes: &[usize]) {
     let to_dot = |tokens: u64| ((tokens as f64 / max as f64) * (v_dots - 1) as f64).round() as usize;
 
     let mut canvas = Canvas::new(plot.area.width as usize, plot.area.height as usize);
-    // Fill: each cell takes the color of the series whose area holds its center.
+    // Fill from the series whose areas hold each cell's center. Stacked bands don't overlap, so
+    // the lowest band containing it owns the cell; overlaid areas all show, blended back to front.
     for row in 0..canvas.rows {
         for col in 0..canvas.cols {
             let (t, v) = plot.cell_center(col, row);
-            let owner = tops.iter().enumerate().filter(|(_, top)| top[t].is_some_and(|top| v <= to_dot(top)));
-            // Stacked: the lowest band containing it. Overlaid: the frontmost (last drawn).
-            let owner = if stacked { owner.min_by_key(|(_, top)| top[t]).map(|(i, _)| i) } else { owner.last().map(|(i, _)| i) };
-            canvas.bg[row * canvas.cols + col] = owner.map(|i| fill_color(series[i].k));
+            let covering = tops.iter().enumerate().filter(|(_, top)| top[t].is_some_and(|top| v <= to_dot(top)));
+            canvas.bg[row * canvas.cols + col] = if stacked {
+                covering.min_by_key(|(_, top)| top[t]).map(|(i, _)| fill_color(series[i].k))
+            } else {
+                fill(covering.map(|(i, _)| series[i].k))
+            };
         }
     }
     // Lines, joined across each step so they stay continuous.
@@ -448,9 +462,13 @@ mod tests {
         assert!(!app.area_stacked);
         let buf = render(&mut app, 60, 13);
         let x = VAX_W + 2;
-        // max 300: lane 1's line on top, lane 0's at a third; lane 0 in front at the base.
+        // max 300: lane 1's line on top, lane 0's at a third. Below lane 0's line both areas
+        // overlap, lane 0's tint over lane 1's; above it only lane 1's.
         assert_eq!(buf[(x, 2)].fg, line_color(1));
-        assert_eq!(buf[(x, 9)].bg, fill_color(0), "smaller series drawn in front");
+        let both = fill([1, 0]).unwrap();
+        assert_eq!(buf[(x, 9)].bg, both, "overlap blends, smaller series in front");
+        assert_ne!(both, fill_color(0));
+        assert_ne!(both, fill_color(1));
         assert_eq!(buf[(x, 4)].bg, fill_color(1));
     }
 
