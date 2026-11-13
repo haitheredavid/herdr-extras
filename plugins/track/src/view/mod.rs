@@ -71,6 +71,10 @@ pub struct App {
     pub focus_requested: Option<String>,
     /// Draw lanes as usage bands when any lane has usage.
     pub bands: bool,
+    /// Area view: series stacked on each other, else overlaid from zero.
+    pub area_stacked: bool,
+    /// Area view while following: stretch the history across the time axis instead of buckets.
+    pub area_fit: bool,
     pub usage: Tracker,
 }
 
@@ -95,6 +99,8 @@ impl App {
             refresh_requested: false,
             focus_requested: None,
             bands: true,
+            area_stacked: true,
+            area_fit: true,
             usage: Tracker::default(),
         }
     }
@@ -185,6 +191,7 @@ impl App {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Esc if self.popup => self.quit = true,
             KeyCode::Char('r') => self.refresh_requested = true,
+            KeyCode::Char('s') if self.view == ViewKind::Area => self.area_stacked = !self.area_stacked,
             KeyCode::Char('u') => {
                 self.bands = !self.bands;
                 self.lane_scroll = 0;
@@ -193,12 +200,15 @@ impl App {
             KeyCode::Char('f') => {
                 self.follow = true;
                 self.seq_back = 0;
+                self.area_fit = true;
             }
             KeyCode::Char('+') | KeyCode::Char('=') if self.view.timed() => {
-                self.bucket_idx = self.bucket_idx.saturating_sub(1)
+                self.bucket_idx = self.bucket_idx.saturating_sub(1);
+                self.area_fit = false;
             }
             KeyCode::Char('-') if self.view.timed() => {
-                self.bucket_idx = (self.bucket_idx + 1).min(BUCKETS_S.len() - 1)
+                self.bucket_idx = (self.bucket_idx + 1).min(BUCKETS_S.len() - 1);
+                self.area_fit = false;
             }
             _ => {}
         }
@@ -540,7 +550,9 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
         Span::raw(if horizontal { " · ↔" } else { " · ↕" }),
         Span::raw(format!(" · {} agents", lanes.len())),
     ];
-    if app.view.timed() {
+    if app.view == ViewKind::Area && app.area_fit && app.follow {
+        spans.push(Span::raw(" · fit"));
+    } else if app.view.timed() {
         spans.push(Span::raw(format!(" · bucket {}", fmt_bucket(BUCKETS_S[app.bucket_idx]))));
     }
     if scale.band > 1 && app.view != ViewKind::Area {
@@ -588,7 +600,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
         if horizontal { "h/l" } else { "j/k" },
     );
     let zoom = if app.view.timed() { " · +/- zoom" } else { "" };
-    let usage = if app.view == ViewKind::Area { "" } else { " · u usage" };
+    let usage = if app.view == ViewKind::Area { " · s stack" } else { " · u usage" };
     let help = format!(
         "Tab {other} · o {flip} · {lane_keys} agent · {scroll_keys} scroll{zoom}{usage} · f follow · enter jump · r refresh · q quit"
     );

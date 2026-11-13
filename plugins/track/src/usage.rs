@@ -87,6 +87,11 @@ impl Tracker {
         self.files.insert(path, Tail { samples, ..Tail::default() });
     }
 
+    /// Time of the first usage sample across the lane's sessions.
+    pub fn first_at(&self, sessions: &[PathBuf]) -> Option<i64> {
+        self.samples(sessions).filter_map(|s| s.first()).map(|s| s.at_ms).min()
+    }
+
     /// Context in use at `t_ms`: the latest sample at or before it across the lane's sessions.
     pub fn ctx_at(&self, sessions: &[PathBuf], t_ms: i64) -> Option<u64> {
         self.samples(sessions)

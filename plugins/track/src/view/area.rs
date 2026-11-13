@@ -1,137 +1,389 @@
-//! Area view: context in use per agent, stacked over time. Each agent is a layer in its own color
-//! (bright while working, dimmed idle or done, red when blocked), and the stack's edge is the total.
-//! Layer boundaries use eighth blocks, so a cell shows the lower layer in front and the upper one
-//! behind.
+//! Area view: context in use per agent over time, as an area chart. Each agent is a series in its
+//! own color: a braille line (2×4 dots per cell) over a tinted fill. Stacked, each series sits on
+//! the ones below and the top line is the total; overlaid (`s`), every series starts at zero with
+//! the largest at the back. A value axis, a legend and labels at each line's end frame it.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
-use super::time::{AXIS_W, draw_axis, start_ms};
-use super::{App, GUTTER, Grid, Orient, put_str, truncate};
-use crate::model::{AgentStatus, status_at};
-use crate::usage::fmt_tokens;
+use super::time::{AXIS_W, start_ms};
+use super::{App, Orient, hms, put_str, truncate};
+use crate::model::{HISTORY_MS, Lane};
+use crate::usage::{Tracker, fmt_tokens};
 
 const PALETTE: [(u8, u8, u8); 6] =
-    [(97, 175, 239), (198, 120, 221), (229, 192, 123), (86, 182, 194), (152, 195, 121), (209, 154, 102)];
-/// Partial cells, by eighths filled from the stack's base: lower blocks in ↔, left blocks in ↕.
-const LOWER: [char; 8] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇'];
-const LEFT: [char; 8] = [' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉'];
+    [(97, 175, 239), (198, 120, 221), (152, 195, 121), (229, 192, 123), (86, 182, 194), (209, 154, 102)];
+/// Assumed terminal background, for tinting fills.
+const BG: (u8, u8, u8) = (28, 28, 30);
+/// ↔ value-axis gutter (`530k `) and end-label margin.
+const VAX_W: u16 = 6;
+const LABEL_W: u16 = 14;
+const GRID: Color = Color::Rgb(72, 72, 78);
+/// ↕ rows under the chart for end labels; labels that would collide drop to the next row.
+const END_ROWS: u16 = 2;
 
-/// Layer color for the `k`th visible lane in `status`.
-fn layer_color(k: usize, status: AgentStatus) -> Color {
-    let (r, g, b) = PALETTE[k % PALETTE.len()];
-    let dim = |c: u8| (u16::from(c) * 45 / 100) as u8;
-    match status {
-        AgentStatus::Working => Color::Rgb(r, g, b),
-        AgentStatus::Blocked => Color::Rgb(224, 108, 117),
-        AgentStatus::Idle | AgentStatus::Done | AgentStatus::Unknown => Color::Rgb(dim(r), dim(g), dim(b)),
+fn series_rgb(k: usize) -> (u8, u8, u8) {
+    PALETTE[k % PALETTE.len()]
+}
+
+fn line_color(k: usize) -> Color {
+    let (r, g, b) = series_rgb(k);
+    Color::Rgb(r, g, b)
+}
+
+fn fill_color(k: usize) -> Color {
+    let (r, g, b) = series_rgb(k);
+    let mix = |c: u8, bg: u8| ((u16::from(c) * 3 + u16::from(bg) * 7) / 10) as u8;
+    Color::Rgb(mix(r, BG.0), mix(g, BG.1), mix(b, BG.2))
+}
+
+/// Smallest 1, 1.5, 2, 2.5, 3, 4, 5, 6 or 8 × 10ⁿ at or above `v`.
+fn nice_ceil(v: u64) -> u64 {
+    if v == 0 {
+        return 0;
+    }
+    let mag = 10f64.powi((v as f64).log10().floor() as i32);
+    [1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0]
+        .iter()
+        .map(|m| (m * mag).round() as u64)
+        .find(|&n| n >= v)
+        .unwrap_or(v)
+}
+
+/// Braille cells: per-cell dot mask, line color and fill color.
+struct Canvas {
+    cols: usize,
+    rows: usize,
+    mask: Vec<u8>,
+    fg: Vec<Option<Color>>,
+    bg: Vec<Option<Color>>,
+}
+
+impl Canvas {
+    fn new(cols: usize, rows: usize) -> Self {
+        Canvas { cols, rows, mask: vec![0; cols * rows], fg: vec![None; cols * rows], bg: vec![None; cols * rows] }
+    }
+
+    /// Lights screen dot (sx, sy): 2 dots across, 4 down per cell.
+    fn dot(&mut self, sx: usize, sy: usize, color: Color) {
+        let (c, r) = (sx / 2, sy / 4);
+        if c >= self.cols || r >= self.rows {
+            return;
+        }
+        const BITS: [[u8; 4]; 2] = [[0x01, 0x02, 0x04, 0x40], [0x08, 0x10, 0x20, 0x80]];
+        let i = r * self.cols + c;
+        self.mask[i] |= BITS[sx % 2][sy % 4];
+        self.fg[i] = Some(color);
     }
 }
 
-/// Cells across the stack for one column: `layers` bottom-up as (color, tokens), scaled so `max`
-/// fills `depth` cells. Each cell is (glyph, front color, back color).
-fn stack(layers: &[(Color, u64)], max: u64, depth: usize, blocks: &[char; 8]) -> Vec<(char, Color, Color)> {
-    let units = depth as u64 * 8;
-    let mut cum = 0;
-    let tops: Vec<(Color, u64)> = layers
-        .iter()
-        .map(|&(c, ctx)| {
-            cum += ctx;
-            (c, (cum * units + max / 2) / max.max(1))
-        })
-        .collect();
-    let owner = |e: u64| tops.iter().find(|(_, top)| e < *top).map(|(c, _)| *c);
-    let mut out = Vec::new();
-    for r in 0..depth as u64 {
-        let lo = r * 8;
-        let Some(front) = owner(lo) else { break };
-        let cell = match (lo + 1..lo + 8).find(|&e| owner(e) != Some(front)) {
-            Some(e) => (blocks[(e - lo) as usize], front, owner(e).unwrap_or(Color::Reset)),
-            None => ('█', front, Color::Reset),
-        };
-        out.push(cell);
+/// One agent's values per time dot (None outside its life or before any usage).
+struct Series {
+    k: usize,
+    vals: Vec<Option<u64>>,
+}
+
+/// Chart geometry in one orientation: time and value axes in dots, and where the chart sits.
+struct Plot {
+    orient: Orient,
+    area: Rect,
+}
+
+impl Plot {
+    fn t_dots(&self) -> usize {
+        match self.orient {
+            Orient::Horizontal => self.area.width as usize * 2,
+            Orient::Vertical => self.area.height as usize * 4,
+        }
     }
-    out
+
+    fn v_dots(&self) -> usize {
+        match self.orient {
+            Orient::Horizontal => self.area.height as usize * 4,
+            Orient::Vertical => self.area.width as usize * 2,
+        }
+    }
+
+    /// Screen dot for time dot `t`, value dot `v` (0 = baseline).
+    fn screen(&self, t: usize, v: usize) -> (usize, usize) {
+        match self.orient {
+            Orient::Horizontal => (t, self.v_dots() - 1 - v.min(self.v_dots() - 1)),
+            Orient::Vertical => (v, t),
+        }
+    }
+
+    /// Chart-space dot at the center of cell (col, row).
+    fn cell_center(&self, col: usize, row: usize) -> (usize, usize) {
+        let (sx, sy) = (col * 2 + 1, row * 4 + 2);
+        match self.orient {
+            Orient::Horizontal => (sx, self.v_dots() - 1 - sy),
+            Orient::Vertical => (sy, sx),
+        }
+    }
+
+    /// Terminal position of the cell holding screen dot (sx, sy).
+    fn cell_pos(&self, sx: usize, sy: usize) -> (u16, u16) {
+        (self.area.x + (sx / 2) as u16, self.area.y + (sy / 4) as u16)
+    }
+}
+
+/// First and last ms the chart covers, and ms per time dot. Fitting while following stretches the
+/// history (capped at `HISTORY_MS`) across the whole time axis; otherwise TIME's buckets apply.
+fn time_frame(app: &App, lanes: &[usize], t_dots: usize, dots_per_cell: usize) -> (i64, i64) {
+    let now = app.now_ms;
+    if app.area_fit && app.follow {
+        let earliest = lanes
+            .iter()
+            .map(|&i| {
+                let l = &app.state.lanes[i];
+                app.usage.first_at(&l.sessions).map_or(l.opened_ms, |f| f.min(l.opened_ms))
+            })
+            .min()
+            .unwrap_or(now)
+            .max(now - HISTORY_MS);
+        let dot_ms = ((now - earliest) / t_dots.max(1) as i64 + 1).max(1000);
+        return (earliest, dot_ms);
+    }
+    let bucket = app.bucket_ms();
+    let start = start_ms(app, lanes, bucket, t_dots / dots_per_cell);
+    (start, (bucket / dots_per_cell as i64).max(1))
+}
+
+fn value_at(lane: &Lane, usage: &Tracker, at: i64) -> Option<u64> {
+    if lane.closed_ms.is_some_and(|c| at >= c) {
+        return None;
+    }
+    usage.ctx_at(&lane.sessions, at)
 }
 
 pub fn render(buf: &mut Buffer, body: Rect, app: &mut App, lanes: &[usize]) {
     let horizontal = app.orient == Orient::Horizontal;
-    let lead = if horizontal { 1 } else { AXIS_W };
-    let grid = Grid { orient: app.orient, body, lead, band: 1 };
-    let n = grid.n();
-    let depth = if horizontal { body.height.saturating_sub(1) } else { body.width.saturating_sub(AXIS_W) } as usize;
-    app.time_cells = n.max(1);
-    let bucket = app.bucket_ms();
-    let start = start_ms(app, lanes, bucket, n);
+    let dim = Style::new().fg(Color::DarkGray);
+    // ↔: legend row, chart, time-axis row; value axis left, end labels right.
+    // ↕: legend row, value-axis row, chart, two end-label rows; time axis left.
+    let label_w = if horizontal && body.width >= 40 { LABEL_W } else { 0 };
+    let plot = if horizontal {
+        Rect::new(body.x + VAX_W, body.y + 1, body.width.saturating_sub(VAX_W + label_w), body.height.saturating_sub(2))
+    } else {
+        Rect::new(body.x + AXIS_W, body.y + 2, body.width.saturating_sub(AXIS_W), body.height.saturating_sub(2 + END_ROWS))
+    };
+    let plot = Plot { orient: app.orient, area: plot };
+    let (t_dots, v_dots) = (plot.t_dots(), plot.v_dots());
+    let dots_per_cell = if horizontal { 2 } else { 4 };
+    app.time_cells = (t_dots / dots_per_cell).max(1);
+    if t_dots == 0 || v_dots == 0 {
+        return;
+    }
+    let (start, dot_ms) = time_frame(app, lanes, t_dots, dots_per_cell);
     let now = app.now_ms;
 
-    let columns: Vec<Vec<(Color, u64)>> = (0..n)
-        .map(|i| {
-            let t0 = start + i as i64 * bucket;
-            if t0 > now {
-                return Vec::new();
-            }
-            let at = (t0 + bucket - 1).min(now);
-            lanes
-                .iter()
-                .enumerate()
-                .filter_map(|(k, &li)| {
-                    let lane = &app.state.lanes[li];
-                    let status = status_at(lane, at)?;
-                    let ctx = app.usage.ctx_at(&lane.sessions, at).filter(|&c| c > 0)?;
-                    Some((layer_color(k, status), ctx))
+    let mut series: Vec<Series> = lanes
+        .iter()
+        .enumerate()
+        .map(|(k, &li)| {
+            let lane = &app.state.lanes[li];
+            let vals = (0..t_dots)
+                .map(|j| {
+                    let t0 = start + j as i64 * dot_ms;
+                    (t0 <= now).then(|| value_at(lane, &app.usage, (t0 + dot_ms - 1).min(now))).flatten()
                 })
-                .collect()
+                .collect();
+            Series { k, vals }
         })
         .collect();
-    let max = columns.iter().map(|c| c.iter().map(|l| l.1).sum::<u64>()).max().unwrap_or(0);
-
-    draw_axis(buf, &grid, start, bucket);
-    let dim = Style::new().fg(Color::DarkGray);
-    put_str(buf, body, body.x, body.y, &format!("Σ ≤ {}", fmt_tokens(max)), dim);
-    if max == 0 {
-        let (x, y) = if horizontal { (body.x + GUTTER, body.y + 1) } else { (body.x + AXIS_W, body.y + 1) };
-        put_str(buf, body, x, y, "no usage yet — needs omp session usage", dim);
+    let stacked = app.area_stacked;
+    if !stacked {
+        // Back to front: the largest series behind, so smaller ones stay visible.
+        series.sort_by_key(|s| std::cmp::Reverse(s.vals.iter().flatten().max().copied().unwrap_or(0)));
     }
+    // Top of each series per time dot, in tokens: cumulative when stacked.
+    let tops: Vec<Vec<Option<u64>>> = {
+        let mut cum = vec![0u64; t_dots];
+        series
+            .iter()
+            .map(|s| {
+                s.vals
+                    .iter()
+                    .enumerate()
+                    .map(|(j, v)| {
+                        v.map(|v| {
+                            if stacked {
+                                cum[j] += v;
+                                cum[j]
+                            } else {
+                                v
+                            }
+                        })
+                    })
+                    .collect()
+            })
+            .collect()
+    };
+    let max = nice_ceil(tops.iter().flatten().flatten().copied().max().unwrap_or(0));
 
-    // Legend: the top layer first in ↔ (matching the stack), left to right in ↕.
-    let legend: Vec<(usize, usize)> =
-        if horizontal { lanes.iter().copied().enumerate().rev().collect() } else { lanes.iter().copied().enumerate().collect() };
-    for (row, &(k, li)) in legend.iter().enumerate() {
+    // Legend.
+    let mut x = body.x;
+    for (k, &li) in lanes.iter().enumerate() {
         let lane = &app.state.lanes[li];
-        let swatch = Style::new().fg(layer_color(k, lane.status));
-        let mut label = if lane.is_open() { Style::new() } else { dim };
+        let mut style = Style::new().fg(line_color(k));
         if k == app.selected {
-            label = label.add_modifier(Modifier::REVERSED);
+            style = style.add_modifier(Modifier::REVERSED);
         }
-        let ctx = app.usage.ctx_at(&lane.sessions, lane.closed_ms.unwrap_or(now)).map_or("-".into(), fmt_tokens);
-        if horizontal {
-            let y = body.y + 1 + row as u16;
-            if y >= body.bottom() {
-                break;
+        x = put_str(buf, body, x, body.y, "■ ", Style::new().fg(line_color(k)));
+        x = put_str(buf, body, x, body.y, &truncate(lane.label(), 14), style) + 2;
+    }
+    put_str(
+        buf,
+        body,
+        x,
+        body.y,
+        if stacked { "stacked" } else { "overlaid" },
+        dim,
+    );
+    if max == 0 {
+        put_str(buf, body, plot.area.x, plot.area.y, "no usage yet — needs omp session usage", dim);
+        return;
+    }
+    let to_dot = |tokens: u64| ((tokens as f64 / max as f64) * (v_dots - 1) as f64).round() as usize;
+
+    let mut canvas = Canvas::new(plot.area.width as usize, plot.area.height as usize);
+    // Fill: each cell takes the color of the series whose area holds its center.
+    for row in 0..canvas.rows {
+        for col in 0..canvas.cols {
+            let (t, v) = plot.cell_center(col, row);
+            let owner = tops.iter().enumerate().filter(|(_, top)| top[t].is_some_and(|top| v <= to_dot(top)));
+            // Stacked: the lowest band containing it. Overlaid: the frontmost (last drawn).
+            let owner = if stacked { owner.min_by_key(|(_, top)| top[t]).map(|(i, _)| i) } else { owner.last().map(|(i, _)| i) };
+            canvas.bg[row * canvas.cols + col] = owner.map(|i| fill_color(series[i].k));
+        }
+    }
+    // Lines, joined across each step so they stay continuous.
+    for (i, s) in series.iter().enumerate() {
+        let color = line_color(s.k);
+        let mut prev: Option<usize> = None;
+        for t in 0..t_dots {
+            let Some(top) = tops[i][t] else {
+                prev = None;
+                continue;
+            };
+            let d = to_dot(top);
+            let (lo, hi) = prev.map_or((d, d), |p| (p.min(d), p.max(d)));
+            for v in lo..=hi {
+                let (sx, sy) = plot.screen(t, v);
+                canvas.dot(sx, sy, color);
             }
-            put_str(buf, body, body.x, y, "█", swatch);
-            put_str(buf, body, body.x + 2, y, &format!("{:<12} {ctx:>6}", truncate(lane.label(), 12)), label);
-        } else {
-            let x = body.x + AXIS_W + row as u16 * 6;
-            put_str(buf, body, x, body.y, "█", swatch);
-            put_str(buf, body, x + 1, body.y, &truncate(lane.label(), 4), label);
+            prev = Some(d);
         }
     }
 
-    let blocks = if horizontal { &LOWER } else { &LEFT };
-    for (i, layers) in columns.iter().enumerate() {
-        for (r, (ch, fg, bg)) in stack(layers, max, depth, blocks).into_iter().enumerate() {
-            let (x, y) = if horizontal {
-                (body.x + GUTTER + i as u16, body.bottom() - 1 - r as u16)
-            } else {
-                (body.x + AXIS_W + r as u16, body.y + 1 + i as u16)
-            };
-            if x < body.right() && y < body.bottom() {
-                buf[(x, y)].set_char(ch).set_style(Style::new().fg(fg).bg(bg));
+    // Gridlines at value ticks, behind lines; then the canvas.
+    let ticks: Vec<u64> = (0..=4).map(|q| max * q / 4).collect();
+    for (row, col) in (0..canvas.rows).flat_map(|r| (0..canvas.cols).map(move |c| (r, c))) {
+        let i = row * canvas.cols + col;
+        let (x, y) = (plot.area.x + col as u16, plot.area.y + row as u16);
+        let bg = canvas.bg[i].unwrap_or(Color::Reset);
+        let cell = &mut buf[(x, y)];
+        if canvas.mask[i] != 0 {
+            let ch = char::from_u32(0x2800 + u32::from(canvas.mask[i])).unwrap_or(' ');
+            cell.set_char(ch).set_style(Style::new().fg(canvas.fg[i].unwrap_or(Color::Reset)).bg(bg));
+            continue;
+        }
+        let (t, _) = plot.cell_center(col, row);
+        let on_tick = ticks.iter().any(|&tk| {
+            let d = to_dot(tk);
+            match plot.orient {
+                Orient::Horizontal => plot.screen(t, d).1 / 4 == row,
+                Orient::Vertical => plot.screen(t, d).0 / 2 == col,
+            }
+        });
+        let grid = match plot.orient {
+            Orient::Horizontal => '┈',
+            Orient::Vertical => '┆',
+        };
+        cell.set_char(if on_tick { grid } else { ' ' }).set_style(Style::new().fg(GRID).bg(bg));
+    }
+
+    // Value axis labels.
+    for &tk in &ticks {
+        let (sx, sy) = plot.screen(0, to_dot(tk));
+        let text = fmt_tokens(tk);
+        match plot.orient {
+            Orient::Horizontal => {
+                let y = plot.cell_pos(sx, sy).1;
+                put_str(buf, body, body.x, y, &format!("{text:>5}"), dim);
+            }
+            Orient::Vertical => {
+                let len = text.chars().count() as u16;
+                let x = plot.cell_pos(sx, sy).0.saturating_sub(len / 2).max(plot.area.x);
+                let x = x.min(body.right().saturating_sub(len));
+                put_str(buf, body, x, body.y + 1, &text, dim);
             }
         }
+    }
+
+    // Time axis labels.
+    let cells = t_dots / dots_per_cell;
+    let every = if horizontal { 12 } else { 6 };
+    for c in (0..cells).step_by(every) {
+        let t_ms = start + (c * dots_per_cell) as i64 * dot_ms;
+        if t_ms > now {
+            break;
+        }
+        match plot.orient {
+            Orient::Horizontal => {
+                put_str(buf, body, plot.area.x + c as u16, body.bottom() - 1, &format!("┊{}", hms(t_ms)), dim);
+            }
+            Orient::Vertical => {
+                put_str(buf, body, body.x, plot.area.y + c as u16, &hms(t_ms), dim);
+            }
+        }
+    }
+
+    // End labels at each line's last point.
+    let last_t = (0..t_dots).rev().find(|&t| tops.iter().any(|top| top[t].is_some()));
+    let Some(last_t) = last_t else { return };
+    let mut ends: Vec<(u16, u16, usize, u64)> = series
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| {
+            let top = tops[i][last_t]?;
+            let (sx, sy) = plot.screen(last_t, to_dot(top));
+            let (x, y) = plot.cell_pos(sx, sy);
+            Some((x, y, s.k, s.vals[last_t].unwrap_or(0)))
+        })
+        .collect();
+    match plot.orient {
+        Orient::Horizontal if label_w > 0 => {
+            ends.sort_by_key(|e| e.1);
+            let mut used: Vec<u16> = Vec::new();
+            for (_, y, k, val) in ends {
+                let mut y = y;
+                while used.contains(&y) && y + 1 < plot.area.bottom() {
+                    y += 1;
+                }
+                used.push(y);
+                let name = truncate(app.state.lanes[lanes[k]].label(), (LABEL_W - 7) as usize);
+                let x = plot.area.right() + 1;
+                put_str(buf, body, x, y, &format!("{name} {}", fmt_tokens(val)), Style::new().fg(line_color(k)));
+            }
+        }
+        Orient::Vertical => {
+            let first = (plot.cell_pos(0, plot.screen(last_t, 0).1).1 + 1).min(body.bottom().saturating_sub(END_ROWS));
+            ends.sort_by_key(|e| e.0);
+            // Free x per row; each label takes the first row it fits in, at its line's x.
+            let mut free = vec![body.x; END_ROWS as usize];
+            for (x, _, k, val) in ends {
+                let name = truncate(app.state.lanes[lanes[k]].label(), 8);
+                let text = format!("{name} {}", fmt_tokens(val));
+                let len = text.chars().count() as u16;
+                let x = x.min(body.right().saturating_sub(len));
+                let Some(row) = free.iter().position(|&f| f <= x) else { continue };
+                free[row] = x + len + 1;
+                put_str(buf, body, x, first + row as u16, &text, Style::new().fg(line_color(k)));
+            }
+        }
+        _ => {}
     }
 }
 
@@ -140,17 +392,17 @@ mod tests {
     use super::super::ViewKind;
     use super::super::tests::{render, sample_app};
     use super::*;
-    use crate::model::Mark;
+    use crate::model::{AgentStatus, Mark};
     use crate::usage::Sample;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use std::path::PathBuf;
 
-    /// Lane 0 from `sample_app` (idle, working at 2000, blocked at 5000) at 150 tokens, under a
-    /// working lane 1 at 250.
-    fn stacked(orient: Orient) -> App {
+    /// Lane 0 at 100 tokens and lane 1 at 300, both from 0 ms; `now_ms = 8500`.
+    fn two_series(orient: Orient) -> App {
         let mut app = sample_app(ViewKind::Area, orient);
         let i = app.state.open("w1:p2", "w1", 0, Mark::Created, AgentStatus::Working, true);
         app.state.lanes[i].agent = Some("claude".into());
-        for (li, ctx) in [(0, 150), (i, 250)] {
+        for (li, ctx) in [(0, 100), (i, 300)] {
             let path = PathBuf::from(format!("/s{li}.jsonl"));
             app.state.lanes[li].sessions.push(path.clone());
             app.usage.insert(path, vec![Sample { at_ms: 0, ctx }]);
@@ -158,29 +410,71 @@ mod tests {
         app
     }
 
-    #[test]
-    fn layers_stack_with_eighth_block_boundaries() {
-        let mut app = stacked(Orient::Horizontal);
-        // Header, axis row, 4 chart rows (y 2..=5), detail, footer.
-        let buf = render(&mut app, GUTTER + 12, 8);
-        let (idle0, blocked, work1) = (layer_color(0, AgentStatus::Idle), layer_color(0, AgentStatus::Blocked), layer_color(1, AgentStatus::Working));
-        let x = GUTTER;
-        // 150 of 400 over 32 eighths: lane 0 fills 12, so row 1 is half lane 0 in front of lane 1.
-        assert_eq!((buf[(x, 5)].symbol(), buf[(x, 5)].fg), ("█", idle0));
-        assert_eq!((buf[(x, 4)].symbol(), buf[(x, 4)].fg, buf[(x, 4)].bg), ("▄", idle0, work1));
-        assert_eq!((buf[(x, 3)].symbol(), buf[(x, 3)].fg), ("█", work1));
-        assert_eq!((buf[(x, 2)].symbol(), buf[(x, 2)].fg), ("█", work1));
-        assert_eq!(buf[(x + 5, 5)].fg, blocked, "lane 0 blocked from 5000 ms");
-        assert_eq!(buf[(x + 9, 2)].symbol(), " ", "nothing after now");
-        assert_eq!(buf[(0, 2)].fg, work1, "legend lists the top layer first");
+    fn braille(s: &str) -> bool {
+        s.chars().next().is_some_and(|c| ('\u{2801}'..='\u{28FF}').contains(&c))
     }
 
     #[test]
-    fn vertical_stack_grows_rightward() {
-        let mut app = stacked(Orient::Vertical);
-        // Header, legend row, 12 time rows, detail, footer; 4 cells of stack.
-        let buf = render(&mut app, AXIS_W + 4, 16);
-        let row: String = (AXIS_W..AXIS_W + 4).map(|x| buf[(x, 2)].symbol().to_string()).collect();
-        assert_eq!(row, "█▌██");
+    fn nice_ceil_rounds_up_to_readable_maxima() {
+        assert_eq!(nice_ceil(400), 400);
+        assert_eq!(nice_ceil(401), 500);
+        assert_eq!(nice_ceil(527_000), 600_000);
+        assert_eq!(nice_ceil(130_000), 150_000);
+        assert_eq!(nice_ceil(0), 0);
+    }
+
+    /// Body is rows 1..=10 of a 13-row frame: legend row 1, chart rows 2..=9 (32 value dots), time
+    /// axis row 10.
+    #[test]
+    fn stacked_series_sit_on_each_other() {
+        let mut app = two_series(Orient::Horizontal);
+        let buf = render(&mut app, 60, 13);
+        let x = VAX_W + 2;
+        // max 400 over 31 dots: lane 0's top at dot 8 (row 7), the total at dot 31 (row 2).
+        assert!(braille(buf[(x, 2)].symbol()), "total line on the top row");
+        assert_eq!(buf[(x, 2)].fg, line_color(1));
+        assert!(braille(buf[(x, 7)].symbol()), "lane 0's line at a quarter height");
+        assert_eq!(buf[(x, 7)].fg, line_color(0));
+        assert_eq!(buf[(x, 9)].bg, fill_color(0), "lane 0 fills the base");
+        assert_eq!(buf[(x, 4)].bg, fill_color(1), "lane 1 fills above it");
+        assert_eq!(buf[(0, 2)].symbol().trim(), "", "value labels are right-aligned");
+        assert!((0..VAX_W).map(|c| buf[(c, 2)].symbol()).collect::<String>().contains("400"));
+    }
+
+    #[test]
+    fn overlaid_series_start_at_zero_with_largest_behind() {
+        let mut app = two_series(Orient::Horizontal);
+        app.on_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        assert!(!app.area_stacked);
+        let buf = render(&mut app, 60, 13);
+        let x = VAX_W + 2;
+        // max 300: lane 1's line on top, lane 0's at a third; lane 0 in front at the base.
+        assert_eq!(buf[(x, 2)].fg, line_color(1));
+        assert_eq!(buf[(x, 9)].bg, fill_color(0), "smaller series drawn in front");
+        assert_eq!(buf[(x, 4)].bg, fill_color(1));
+    }
+
+    #[test]
+    fn fit_spreads_history_across_the_axis() {
+        let mut app = two_series(Orient::Horizontal);
+        let buf = render(&mut app, 60, 13);
+        // 8.5 s over 80 dots: the 1 s floor applies, so lines end around dot 8 (cell 4).
+        let last = (VAX_W..60).rev().find(|&x| braille(buf[(x, 2)].symbol())).unwrap();
+        assert_eq!(last, VAX_W + 4);
+        app.now_ms = 200_000;
+        let buf = render(&mut app, 60, 13);
+        let last = (VAX_W..60 - LABEL_W).rev().find(|&x| braille(buf[(x, 2)].symbol())).unwrap();
+        assert!(last >= 60 - LABEL_W - 2, "a long history reaches the right edge, got {last}");
+    }
+
+    #[test]
+    fn vertical_values_grow_rightward() {
+        let mut app = two_series(Orient::Vertical);
+        let buf = render(&mut app, AXIS_W + 8, 12);
+        // Chart row 3 (first time row): lane 0's fill at the left, lane 1's line at the right.
+        assert_eq!(buf[(AXIS_W, 3)].bg, fill_color(0));
+        let right = (AXIS_W..AXIS_W + 8).rev().find(|&x| braille(buf[(x, 3)].symbol())).unwrap();
+        assert_eq!(buf[(right, 3)].fg, line_color(1));
+        assert_eq!(right, AXIS_W + 7);
     }
 }
