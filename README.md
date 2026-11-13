@@ -28,7 +28,7 @@ track · TIME · ↔ · 2 agents · bucket 15s · follow ●
 ✕ fix login   ctx-h   ◇━━━●──✕
 ```
 
-Actions `herdr-extras.track.open` (side panel: a 64-column split right of the focused pane) and `herdr-extras.track.open-popup`.
+Actions `herdr-extras.track.open` (a 14-row band below the focused pane, full width in a single-pane tab) and `herdr-extras.track.open-popup`.
 
 - **Views** (`Tab`): TIME draws one cell per time bucket, so line length is wall-clock duration. SEQUENCE draws one evenly spaced node per state change, so every lane starts at the near edge. AREA is an area chart of each agent's context in use: a braille line per agent in its own color over a tinted fill, stacked so the top line is the total (`s` overlays them from zero instead: largest behind, overlapping fills blended so each shows through). It has a value axis with round ticks, a legend, and a label with the current context at each line's end. While following it fits the last 2 h of session history across the axis (`fit` in the header); `+/-` switch to TIME's buckets and `f` fits again.
 - **Orientations** (`o`): ↔ lanes are rows with time flowing right; ↕ lanes are columns with time flowing down.
