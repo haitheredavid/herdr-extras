@@ -215,6 +215,46 @@ impl App {
     }
 }
 
+/// Viridis, as 11 evenly spaced stops; colors between are interpolated.
+const VIRIDIS: [(u8, u8, u8); 11] = [
+    (0x44, 0x01, 0x54),
+    (0x48, 0x24, 0x75),
+    (0x41, 0x44, 0x87),
+    (0x35, 0x5f, 0x8d),
+    (0x2a, 0x78, 0x8e),
+    (0x21, 0x91, 0x8c),
+    (0x22, 0xa8, 0x84),
+    (0x44, 0xbf, 0x70),
+    (0x7a, 0xd1, 0x51),
+    (0xbd, 0xdf, 0x26),
+    (0xfd, 0xe7, 0x25),
+];
+/// Darkest viridis position used: below this the purples vanish on a dark terminal.
+const VIRIDIS_FROM: f64 = 0.25;
+
+/// Viridis at `t` in 0..=1.
+fn viridis(t: f64) -> (u8, u8, u8) {
+    let x = t.clamp(0.0, 1.0) * (VIRIDIS.len() - 1) as f64;
+    let i = (x.floor() as usize).min(VIRIDIS.len() - 2);
+    let f = x - i as f64;
+    let (a, b) = (VIRIDIS[i], VIRIDIS[i + 1]);
+    let lerp = |p: u8, q: u8| (f64::from(p) + (f64::from(q) - f64::from(p)) * f).round() as u8;
+    (lerp(a.0, b.0), lerp(a.1, b.1), lerp(a.2, b.2))
+}
+
+/// Color of agent `k` of `n` (visible lanes, in order): spread evenly over viridis from
+/// `VIRIDIS_FROM` to yellow, so the first agent (the base of a stack) is blue-purple and the last
+/// yellow.
+fn series_rgb(k: usize, n: usize) -> (u8, u8, u8) {
+    let t = if n <= 1 { 0.5 } else { k as f64 / (n - 1) as f64 };
+    viridis(VIRIDIS_FROM + (1.0 - VIRIDIS_FROM) * t)
+}
+
+pub fn series_color(k: usize, n: usize) -> Color {
+    let (r, g, b) = series_rgb(k, n);
+    Color::Rgb(r, g, b)
+}
+
 pub fn status_color(s: AgentStatus) -> Color {
     match s {
         AgentStatus::Working => Color::Green,
@@ -481,18 +521,23 @@ impl Grid {
                     put_str(buf, self.body, x, self.body.y, &format!("{:<5}", truncate(lane.label(), 5)), label_style);
                 }
             }
+            // Lines and bends take the agent's color; nodes and the head keep their status colors.
+            let agent = series_color(k, lanes.len());
             let mut prev: Option<u8> = None;
             for (i, pt) in pts(lane, &app.usage, n).into_iter().enumerate().take(n) {
                 let Some((mut ch, mut color)) = pt.cell else {
                     prev = None;
                     continue;
                 };
+                if is_line(ch) {
+                    color = agent;
+                }
                 if let Some(p) = prev
                     && p != pt.level
                 {
                     let s = pt.status.unwrap_or_default();
                     let heavy = matches!(s, AgentStatus::Working | AgentStatus::Blocked | AgentStatus::Done);
-                    let c = status_color(s);
+                    let c = agent;
                     let (from, mid, to) = bend(self.orient, pt.level > p, heavy);
                     self.put(buf, self.cell_pos(slot, i, p), from, c);
                     for l in p.min(pt.level) + 1..p.max(pt.level) {
@@ -672,6 +717,16 @@ pub(crate) mod tests {
         press(&mut app, 'j');
         assert_eq!(app.selected, 1, "clamped");
         assert!(app.follow);
+    }
+
+    #[test]
+    fn series_spread_over_viridis() {
+        assert_eq!(viridis(0.0), (0x44, 0x01, 0x54));
+        assert_eq!(viridis(1.0), (0xfd, 0xe7, 0x25));
+        assert_eq!(viridis(0.5), (0x21, 0x91, 0x8c));
+        assert_eq!(series_rgb(1, 2), (0xfd, 0xe7, 0x25), "top series is yellow");
+        assert_eq!(series_rgb(0, 2), viridis(VIRIDIS_FROM), "base skips the darkest purples");
+        assert_eq!(series_rgb(1, 3), viridis(VIRIDIS_FROM + (1.0 - VIRIDIS_FROM) / 2.0));
     }
 
     #[test]

@@ -106,6 +106,8 @@ mod tests {
         let buf = render(&mut app, GUTTER + 12, 5);
         assert_eq!(row(&buf, 2, GUTTER, GUTTER + 12), "◆─●━━●━━▸");
         assert_eq!(buf[(GUTTER + 8, 2)].fg, Color::Red, "head in the current status color");
+        assert_eq!(buf[(GUTTER + 1, 2)].fg, super::super::series_color(0, 1), "lines take the agent's color");
+        assert_eq!(buf[(GUTTER + 2, 2)].fg, Color::Green, "status nodes keep status colors");
         assert!(row(&buf, 0, 0, GUTTER + 12).starts_with("track · TIME · ↔"));
     }
 

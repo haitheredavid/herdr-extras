@@ -1,33 +1,17 @@
 //! Area view: context in use per agent over time, as an area chart. Each agent is a series in its
-//! own color: a braille line (2×4 dots per cell) over a tinted fill. Stacked, each series sits on
-//! the ones below and the top line is the total; overlaid (`s`), every series starts at zero with
-//! the largest at the back. A value axis, a legend and labels at each line's end frame it.
+//! viridis color: a braille line (2×4 dots per cell) over a tinted fill. Stacked, each series sits
+//! on the ones below and the top line is the total; overlaid (`s`), every series starts at zero
+//! with the largest at the back. A value axis, a legend and labels at each line's end frame it.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
 use super::time::{AXIS_W, start_ms};
-use super::{App, Orient, hms, put_str, truncate};
+use super::{App, Orient, hms, put_str, series_color, series_rgb, truncate};
 use crate::model::{HISTORY_MS, Lane};
 use crate::usage::{Tracker, fmt_tokens};
 
-/// Viridis, as 11 evenly spaced stops; colors between are interpolated.
-const VIRIDIS: [(u8, u8, u8); 11] = [
-    (0x44, 0x01, 0x54),
-    (0x48, 0x24, 0x75),
-    (0x41, 0x44, 0x87),
-    (0x35, 0x5f, 0x8d),
-    (0x2a, 0x78, 0x8e),
-    (0x21, 0x91, 0x8c),
-    (0x22, 0xa8, 0x84),
-    (0x44, 0xbf, 0x70),
-    (0x7a, 0xd1, 0x51),
-    (0xbd, 0xdf, 0x26),
-    (0xfd, 0xe7, 0x25),
-];
-/// Darkest viridis position used: below this the purples vanish on a dark terminal.
-const VIRIDIS_FROM: f64 = 0.25;
 /// Assumed terminal background, for tinting fills.
 const BG: (u8, u8, u8) = (28, 28, 30);
 /// ↔ value-axis gutter (`530k `) and end-label margin.
@@ -36,28 +20,6 @@ const LABEL_W: u16 = 14;
 const GRID: Color = Color::Rgb(72, 72, 78);
 /// ↕ rows under the chart for end labels; labels that would collide drop to the next row.
 const END_ROWS: u16 = 2;
-
-/// Viridis at `t` in 0..=1.
-fn viridis(t: f64) -> (u8, u8, u8) {
-    let x = t.clamp(0.0, 1.0) * (VIRIDIS.len() - 1) as f64;
-    let i = (x.floor() as usize).min(VIRIDIS.len() - 2);
-    let f = x - i as f64;
-    let (a, b) = (VIRIDIS[i], VIRIDIS[i + 1]);
-    let lerp = |p: u8, q: u8| (f64::from(p) + (f64::from(q) - f64::from(p)) * f).round() as u8;
-    (lerp(a.0, b.0), lerp(a.1, b.1), lerp(a.2, b.2))
-}
-
-/// Color of series `k` of `n`: spread evenly over viridis from `VIRIDIS_FROM` to yellow, so the
-/// base of the stack is blue-purple and the top yellow.
-fn series_rgb(k: usize, n: usize) -> (u8, u8, u8) {
-    let t = if n <= 1 { 0.5 } else { k as f64 / (n - 1) as f64 };
-    viridis(VIRIDIS_FROM + (1.0 - VIRIDIS_FROM) * t)
-}
-
-fn line_color(k: usize, n: usize) -> Color {
-    let (r, g, b) = series_rgb(k, n);
-    Color::Rgb(r, g, b)
-}
 
 /// Fill where the series `ks` cover a cell, back to front: each lays a 30% tint of its color over
 /// what is behind it, so overlapping areas show through each other.
@@ -265,11 +227,11 @@ pub fn render(buf: &mut Buffer, body: Rect, app: &mut App, lanes: &[usize]) {
     let mut x = body.x;
     for (k, &li) in lanes.iter().enumerate() {
         let lane = &app.state.lanes[li];
-        let mut style = Style::new().fg(line_color(k, n));
+        let mut style = Style::new().fg(series_color(k, n));
         if k == app.selected {
             style = style.add_modifier(Modifier::REVERSED);
         }
-        x = put_str(buf, body, x, body.y, "■ ", Style::new().fg(line_color(k, n)));
+        x = put_str(buf, body, x, body.y, "■ ", Style::new().fg(series_color(k, n)));
         x = put_str(buf, body, x, body.y, &truncate(lane.label(), 14), style) + 2;
     }
     put_str(
@@ -302,7 +264,7 @@ pub fn render(buf: &mut Buffer, body: Rect, app: &mut App, lanes: &[usize]) {
     }
     // Lines, joined across each step so they stay continuous.
     for (i, s) in series.iter().enumerate() {
-        let color = line_color(s.k, n);
+        let color = series_color(s.k, n);
         let mut prev: Option<usize> = None;
         for t in 0..t_dots {
             let Some(top) = tops[i][t] else {
@@ -407,7 +369,7 @@ pub fn render(buf: &mut Buffer, body: Rect, app: &mut App, lanes: &[usize]) {
                 used.push(y);
                 let name = truncate(app.state.lanes[lanes[k]].label(), (LABEL_W - 7) as usize);
                 let x = plot.area.right() + 1;
-                put_str(buf, body, x, y, &format!("{name} {}", fmt_tokens(val)), Style::new().fg(line_color(k, n)));
+                put_str(buf, body, x, y, &format!("{name} {}", fmt_tokens(val)), Style::new().fg(series_color(k, n)));
             }
         }
         Orient::Vertical => {
@@ -422,7 +384,7 @@ pub fn render(buf: &mut Buffer, body: Rect, app: &mut App, lanes: &[usize]) {
                 let x = x.min(body.right().saturating_sub(len));
                 let Some(row) = free.iter().position(|&f| f <= x) else { continue };
                 free[row] = x + len + 1;
-                put_str(buf, body, x, first + row as u16, &text, Style::new().fg(line_color(k, n)));
+                put_str(buf, body, x, first + row as u16, &text, Style::new().fg(series_color(k, n)));
             }
         }
         _ => {}
@@ -457,16 +419,6 @@ mod tests {
     }
 
     #[test]
-    fn series_spread_over_viridis() {
-        assert_eq!(viridis(0.0), (0x44, 0x01, 0x54));
-        assert_eq!(viridis(1.0), (0xfd, 0xe7, 0x25));
-        assert_eq!(viridis(0.5), (0x21, 0x91, 0x8c));
-        assert_eq!(series_rgb(1, 2), (0xfd, 0xe7, 0x25), "top series is yellow");
-        assert_eq!(series_rgb(0, 2), viridis(VIRIDIS_FROM), "base skips the darkest purples");
-        assert_eq!(series_rgb(1, 3), viridis(VIRIDIS_FROM + (1.0 - VIRIDIS_FROM) / 2.0));
-    }
-
-    #[test]
     fn nice_ceil_rounds_up_to_readable_maxima() {
         assert_eq!(nice_ceil(400), 400);
         assert_eq!(nice_ceil(401), 500);
@@ -484,9 +436,9 @@ mod tests {
         let x = VAX_W + 2;
         // max 400 over 31 dots: lane 0's top at dot 8 (row 7), the total at dot 31 (row 2).
         assert!(braille(buf[(x, 2)].symbol()), "total line on the top row");
-        assert_eq!(buf[(x, 2)].fg, line_color(1, 2));
+        assert_eq!(buf[(x, 2)].fg, series_color(1, 2));
         assert!(braille(buf[(x, 7)].symbol()), "lane 0's line at a quarter height");
-        assert_eq!(buf[(x, 7)].fg, line_color(0, 2));
+        assert_eq!(buf[(x, 7)].fg, series_color(0, 2));
         assert_eq!(buf[(x, 9)].bg, fill_color(0, 2), "lane 0 fills the base");
         assert_eq!(buf[(x, 4)].bg, fill_color(1, 2), "lane 1 fills above it");
         assert_eq!(buf[(0, 2)].symbol().trim(), "", "value labels are right-aligned");
@@ -502,7 +454,7 @@ mod tests {
         let x = VAX_W + 2;
         // max 300: lane 1's line on top, lane 0's at a third. Below lane 0's line both areas
         // overlap, lane 0's tint over lane 1's; above it only lane 1's.
-        assert_eq!(buf[(x, 2)].fg, line_color(1, 2));
+        assert_eq!(buf[(x, 2)].fg, series_color(1, 2));
         let both = fill([1, 0], 2).unwrap();
         assert_eq!(buf[(x, 9)].bg, both, "overlap blends, smaller series in front");
         assert_ne!(both, fill_color(0, 2));
@@ -530,7 +482,7 @@ mod tests {
         // Chart row 3 (first time row): lane 0's fill at the left, lane 1's line at the right.
         assert_eq!(buf[(AXIS_W, 3)].bg, fill_color(0, 2));
         let right = (AXIS_W..AXIS_W + 8).rev().find(|&x| braille(buf[(x, 3)].symbol())).unwrap();
-        assert_eq!(buf[(right, 3)].fg, line_color(1, 2));
+        assert_eq!(buf[(right, 3)].fg, series_color(1, 2));
         assert_eq!(right, AXIS_W + 7);
     }
 }
