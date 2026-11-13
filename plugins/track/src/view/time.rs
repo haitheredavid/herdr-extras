@@ -9,11 +9,11 @@ use crate::model::{Lane, status_at};
 use crate::usage::Tracker;
 
 /// Vertical axis gutter: `HH:MM:SS` plus a space.
-const AXIS_W: u16 = 9;
+pub(super) const AXIS_W: u16 = 9;
 
 /// Start of the first cell. Following, lines start at the near edge while everything fits and
 /// grow toward now; once they don't, the view scrolls with now on the last cell.
-fn start_ms(app: &App, lanes: &[usize], bucket: i64, n: usize) -> i64 {
+pub(super) fn start_ms(app: &App, lanes: &[usize], bucket: i64, n: usize) -> i64 {
     let span = n as i64 * bucket;
     if !app.follow {
         return (app.view_end_ms.div_euclid(bucket) + 1) * bucket - span;
@@ -59,6 +59,22 @@ fn pts(lane: &Lane, usage: &Tracker, scale: Scale, start: i64, bucket: i64, n: u
         .collect()
 }
 
+/// Axis labels sit on absolute bucket multiples so they scroll with time.
+pub(super) fn draw_axis(buf: &mut Buffer, grid: &Grid, start: i64, bucket: i64) {
+    let (every, prefix) = match grid.orient {
+        Orient::Horizontal => (12, "┊"),
+        Orient::Vertical => (6, ""),
+    };
+    let dim = Style::new().fg(Color::DarkGray);
+    for i in 0..grid.n() {
+        let t0 = start + i as i64 * bucket;
+        if (t0 / bucket).rem_euclid(every) == 0 {
+            let (x, y) = grid.axis_pos(i);
+            put_str(buf, grid.body, x, y, &format!("{prefix}{}", hms(t0)), dim);
+        }
+    }
+}
+
 pub fn render(buf: &mut Buffer, body: Rect, app: &mut App, lanes: &[usize], scale: Scale) {
     let lead = match app.orient {
         Orient::Horizontal => 1,
@@ -70,19 +86,7 @@ pub fn render(buf: &mut Buffer, body: Rect, app: &mut App, lanes: &[usize], scal
     let bucket = app.bucket_ms();
     let start = start_ms(app, lanes, bucket, n);
 
-    // Axis labels sit on absolute bucket multiples so they scroll with time.
-    let (every, prefix) = match app.orient {
-        Orient::Horizontal => (12, "┊"),
-        Orient::Vertical => (6, ""),
-    };
-    let dim = Style::new().fg(Color::DarkGray);
-    for i in 0..n {
-        let t0 = start + i as i64 * bucket;
-        if (t0 / bucket).rem_euclid(every) == 0 {
-            let (x, y) = grid.axis_pos(i);
-            put_str(buf, body, x, y, &format!("{prefix}{}", hms(t0)), dim);
-        }
-    }
+    draw_axis(buf, &grid, start, bucket);
 
     let (now, orient) = (app.now_ms, app.orient);
     grid.draw_lanes(buf, app, lanes, |lane, usage, n| pts(lane, usage, scale, start, bucket, n, now, orient));

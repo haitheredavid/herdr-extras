@@ -1,5 +1,6 @@
 //! Shared frame (header, detail, footer), lane layout for both orientations, glyphs and keys.
 
+mod area;
 mod sequence;
 mod time;
 
@@ -26,6 +27,15 @@ const BAND: u16 = 4;
 pub enum ViewKind {
     Time,
     Sequence,
+    /// Stacked context per agent over time.
+    Area,
+}
+
+impl ViewKind {
+    /// Cells are time buckets: zoom and time scrolling apply.
+    fn timed(self) -> bool {
+        matches!(self, ViewKind::Time | ViewKind::Area)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,7 +144,7 @@ impl App {
         let step = (self.time_cells as i64 / 4).max(1) * self.bucket_ms();
         if back {
             match self.view {
-                ViewKind::Time => {
+                ViewKind::Time | ViewKind::Area => {
                     if self.follow {
                         self.view_end_ms = self.now_ms;
                     }
@@ -147,7 +157,7 @@ impl App {
         }
         if fwd {
             match self.view {
-                ViewKind::Time => {
+                ViewKind::Time | ViewKind::Area => {
                     self.view_end_ms += step;
                     if self.view_end_ms >= self.now_ms {
                         self.follow = true;
@@ -164,7 +174,8 @@ impl App {
             KeyCode::Tab => {
                 self.view = match self.view {
                     ViewKind::Time => ViewKind::Sequence,
-                    ViewKind::Sequence => ViewKind::Time,
+                    ViewKind::Sequence => ViewKind::Area,
+                    ViewKind::Area => ViewKind::Time,
                 }
             }
             KeyCode::Char('o') => {
@@ -183,10 +194,10 @@ impl App {
                 self.follow = true;
                 self.seq_back = 0;
             }
-            KeyCode::Char('+') | KeyCode::Char('=') if self.view == ViewKind::Time => {
+            KeyCode::Char('+') | KeyCode::Char('=') if self.view.timed() => {
                 self.bucket_idx = self.bucket_idx.saturating_sub(1)
             }
-            KeyCode::Char('-') if self.view == ViewKind::Time => {
+            KeyCode::Char('-') if self.view.timed() => {
                 self.bucket_idx = (self.bucket_idx + 1).min(BUCKETS_S.len() - 1)
             }
             _ => {}
@@ -499,7 +510,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
     let dim = Style::new().fg(Color::DarkGray);
     let lanes = app.state.visible_lanes();
     app.selected = app.selected.min(lanes.len().saturating_sub(1));
-    if app.view == ViewKind::Time && app.follow {
+    if app.view.timed() && app.follow {
         app.view_end_ms = app.now_ms;
     }
 
@@ -510,6 +521,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
         match app.view {
             ViewKind::Time => time::render(buf, body, app, &lanes, scale),
             ViewKind::Sequence => sequence::render(buf, body, app, &lanes, scale),
+            ViewKind::Area => area::render(buf, body, app, &lanes),
         }
     }
 
@@ -521,16 +533,17 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
             match app.view {
                 ViewKind::Time => "TIME",
                 ViewKind::Sequence => "SEQUENCE",
+                ViewKind::Area => "AREA",
             },
             Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
         ),
         Span::raw(if horizontal { " · ↔" } else { " · ↕" }),
         Span::raw(format!(" · {} agents", lanes.len())),
     ];
-    if app.view == ViewKind::Time {
+    if app.view.timed() {
         spans.push(Span::raw(format!(" · bucket {}", fmt_bucket(BUCKETS_S[app.bucket_idx]))));
     }
-    if scale.band > 1 {
+    if scale.band > 1 && app.view != ViewKind::Area {
         spans.push(Span::raw(format!(" · ctx ≤ {}", fmt_tokens(scale.max))));
     }
     spans.push(Span::raw(format!(" · follow {}", if app.follow { '●' } else { '○' })));
@@ -567,15 +580,17 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
     let (other, flip, lane_keys, scroll_keys) = (
         match app.view {
             ViewKind::Time => "sequence",
-            ViewKind::Sequence => "time",
+            ViewKind::Sequence => "area",
+            ViewKind::Area => "time",
         },
         if horizontal { "vertical" } else { "horizontal" },
         if horizontal { "j/k" } else { "h/l" },
         if horizontal { "h/l" } else { "j/k" },
     );
-    let zoom = if app.view == ViewKind::Time { " · +/- zoom" } else { "" };
+    let zoom = if app.view.timed() { " · +/- zoom" } else { "" };
+    let usage = if app.view == ViewKind::Area { "" } else { " · u usage" };
     let help = format!(
-        "Tab {other} · o {flip} · {lane_keys} agent · {scroll_keys} scroll{zoom} · u usage · f follow · enter jump · r refresh · q quit"
+        "Tab {other} · o {flip} · {lane_keys} agent · {scroll_keys} scroll{zoom}{usage} · f follow · enter jump · r refresh · q quit"
     );
     render_line(Line::styled(help, dim), footer, buf);
 }

@@ -30,7 +30,7 @@ track · TIME · ↔ · 2 agents · bucket 15s · follow ●
 
 Actions `herdr-extras.track.open` (side panel: a 64-column split right of the focused pane) and `herdr-extras.track.open-popup`.
 
-- **Views** (`Tab`): TIME draws one cell per time bucket, so line length is wall-clock duration. SEQUENCE draws one evenly spaced node per state change, so every lane starts at the near edge.
+- **Views** (`Tab`): TIME draws one cell per time bucket, so line length is wall-clock duration. SEQUENCE draws one evenly spaced node per state change, so every lane starts at the near edge. AREA stacks each agent's context in use over time as a layer in its own color (bright while working, dimmed idle or done, red when blocked), with eighth-block edges; the scale fits the largest total on screen (`Σ ≤ 526k`) and the legend lists each agent's current context. AREA shares TIME's zoom and scrolling.
 - **Orientations** (`o`): ↔ lanes are rows with time flowing right; ↕ lanes are columns with time flowing down.
 - **Usage bands** (`u` toggles): for omp agents, each lane is a 4-cell band and the line sits across it by context in use (input + cache tokens of the latest turn, read from the session file herdr reports for the pane), so it climbs as the conversation grows and drops on compaction. The scale is shared across visible lanes (`ctx ≤ 320k` in the header), and each lane's current context shows under its label. Without usage data lanes stay one cell thick.
 - **Keys** follow the orientation. The lane keys are `j/k` in ↔ and `h/l` in ↕, and the other pair scrolls along time. In TIME, `+/-` zoom through 1s, 5s, 15s, 1m and 5m buckets. `f` returns to following now, `Enter` focuses the selected agent's pane, `u` toggles usage bands, `r` re-snapshots and `q` quits (`Esc` also quits in the popup).
@@ -43,7 +43,7 @@ Actions `herdr-extras.track.open` (side panel: a 64-column split right of the fo
 cd plugins/track
 cargo test
 cargo build --release
-./target/release/herdr-track --dump --width 120 --height 20 [--view sequence] [--orient v]
+./target/release/herdr-track --dump --width 120 --height 20 [--view sequence|area] [--orient v]
 ```
 
 `--dump` renders one frame against the running herdr to stdout.
