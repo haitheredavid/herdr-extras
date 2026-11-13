@@ -24,7 +24,7 @@ command = ["target/release/herdr-track", "--popup"]
 
 [[actions]]
 id = "open"
-title = "Agent track (split)"
+title = "Agent track (side panel)"
 command = ["target/release/herdr-track", "open", "split"]
 
 [[actions]]

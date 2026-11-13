@@ -28,7 +28,7 @@ track · TIME · ↔ · 2 agents · bucket 15s · follow ●
 ✕ fix login   ctx-h   ◇━━━●──✕
 ```
 
-Actions `herdr-extras.track.open` (split below the focused pane) and `herdr-extras.track.open-popup`.
+Actions `herdr-extras.track.open` (side panel: a 64-column split right of the focused pane) and `herdr-extras.track.open-popup`.
 
 - **Views** (`Tab`): TIME draws one cell per time bucket, so line length is wall-clock duration. SEQUENCE draws one evenly spaced node per state change, so every lane starts at the near edge.
 - **Orientations** (`o`): ↔ lanes are rows with time flowing right; ↕ lanes are columns with time flowing down.
