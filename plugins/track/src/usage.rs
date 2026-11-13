@@ -121,12 +121,12 @@ impl Tracker {
     }
 }
 
-/// `312k`, `1.25M`.
+/// `312k`, `1.25M`, `2M`.
 pub fn fmt_tokens(n: u64) -> String {
     match n {
         0..1000 => n.to_string(),
         1000..1_000_000 => format!("{}k", n / 1000),
-        _ => format!("{:.2}M", n as f64 / 1e6),
+        _ => format!("{:.2}", n as f64 / 1e6).trim_end_matches('0').trim_end_matches('.').to_string() + "M",
     }
 }
 
@@ -183,5 +183,7 @@ pub(crate) mod tests {
         assert_eq!(fmt_tokens(999), "999");
         assert_eq!(fmt_tokens(312_400), "312k");
         assert_eq!(fmt_tokens(1_250_000), "1.25M");
+        assert_eq!(fmt_tokens(1_500_000), "1.5M");
+        assert_eq!(fmt_tokens(2_000_000), "2M");
     }
 }

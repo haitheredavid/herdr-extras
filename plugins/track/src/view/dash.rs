@@ -4,9 +4,10 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 
-use super::{App, fmt_dur, put_str, series_color, status_color, truncate};
+use super::{App, fmt_dur, put_str, truncate};
+use crate::theme::theme;
 use crate::model::{HISTORY_MS, status_time};
 use crate::usage::fmt_tokens;
 
@@ -41,7 +42,7 @@ fn bar(share: f64) -> String {
 pub fn render(buf: &mut Buffer, body: Rect, app: &mut App, lanes: &[usize]) {
     let now = app.now_ms;
     let from = now - HISTORY_MS;
-    let dim = Style::new().fg(Color::DarkGray);
+    let dim = Style::new().fg(theme().dim);
     let spark_w = body.width.saturating_sub(FIXED_W + 1);
     let spark_w = if spark_w >= MIN_SPARK { spark_w } else { 0 };
     let cell_ms = HISTORY_MS / i64::from(spark_w.max(1));
@@ -91,13 +92,13 @@ pub fn render(buf: &mut Buffer, body: Rect, app: &mut App, lanes: &[usize]) {
         if k == sel {
             label = label.add_modifier(Modifier::REVERSED);
         }
-        let (dot, dot_style) = if lane.is_open() { ("●", Style::new().fg(status_color(lane.status))) } else { ("✕", dim) };
+        let (dot, dot_style) = if lane.is_open() { ("●", Style::new().fg(theme().status(lane.status))) } else { ("✕", dim) };
         put_str(buf, body, body.x, y, dot, dot_style);
         put_str(buf, body, x_name, y, &format!("{:<w$}", truncate(lane.label(), NAME_W as usize), w = NAME_W as usize), label);
         put_str(buf, body, x_ws, y, &truncate(app.state.workspace_label(li), WS_W as usize), dim);
 
         if spark_w > 0 && spark_max > 0 {
-            let color = series_color(k, lanes.len());
+            let color = theme().series_color(k, lanes.len());
             let spark: String = (0..spark_w)
                 .map(|i| {
                     let at = (from + (i64::from(i) + 1) * cell_ms - 1).min(now);
@@ -117,7 +118,7 @@ pub fn render(buf: &mut Buffer, body: Rect, app: &mut App, lanes: &[usize]) {
 
         let st = status_time(lane, from, now);
         let share = if st.alive_ms > 0 { st.working_ms as f64 / st.alive_ms as f64 } else { 0.0 };
-        put_str(buf, body, x_work, y, &bar(share), Style::new().fg(status_color(crate::model::AgentStatus::Working)));
+        put_str(buf, body, x_work, y, &bar(share), Style::new().fg(theme().working));
         put_str(buf, body, x_work + BAR_W as u16, y, &format!("{:>4}%", (share * 100.0).round() as u32), Style::new());
 
         let (reqs, cost) = app.usage.spend_between(&lane.sessions, from, now);
@@ -128,7 +129,7 @@ pub fn render(buf: &mut Buffer, body: Rect, app: &mut App, lanes: &[usize]) {
             Some(_) => "closed".to_string(),
             None => format!("{} {}", lane.status.as_str(), fmt_dur(now - lane.last_ms())),
         };
-        put_str(buf, body, x_state, y, &truncate(&state, STATE_W as usize), Style::new().fg(status_color(lane.status)));
+        put_str(buf, body, x_state, y, &truncate(&state, STATE_W as usize), Style::new().fg(theme().status(lane.status)));
     }
 }
 

@@ -15,6 +15,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
 use crate::model::{AgentStatus, Lane, Mark, State};
+use crate::theme::{theme, theme_problems};
 use crate::usage::{Tracker, fmt_tokens};
 
 pub const BUCKETS_S: [i64; 5] = [1, 5, 15, 60, 300];
@@ -62,6 +63,35 @@ impl ViewKind {
     }
 }
 
+/// How AREA lays its series out; `s` cycles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AreaMode {
+    /// Each series on the ones before it; the top line is the total.
+    Stacked,
+    /// Every series from zero, largest behind, overlaps blended.
+    Overlaid,
+    /// Stacked around a centered baseline (a streamgraph); thickness is the total.
+    Stream,
+}
+
+impl AreaMode {
+    fn name(self) -> &'static str {
+        match self {
+            AreaMode::Stacked => "stacked",
+            AreaMode::Overlaid => "overlaid",
+            AreaMode::Stream => "stream",
+        }
+    }
+
+    fn next(self) -> AreaMode {
+        match self {
+            AreaMode::Stacked => AreaMode::Overlaid,
+            AreaMode::Overlaid => AreaMode::Stream,
+            AreaMode::Stream => AreaMode::Stacked,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Orient {
     Horizontal,
@@ -95,8 +125,7 @@ pub struct App {
     pub focus_requested: Option<String>,
     /// Draw lanes as usage bands when any lane has usage.
     pub bands: bool,
-    /// Area view: series stacked on each other, else overlaid from zero.
-    pub area_stacked: bool,
+    pub area_mode: AreaMode,
     /// Area view while following: stretch the history across the time axis instead of buckets.
     pub area_fit: bool,
     pub usage: Tracker,
@@ -123,7 +152,7 @@ impl App {
             refresh_requested: false,
             focus_requested: None,
             bands: true,
-            area_stacked: true,
+            area_mode: AreaMode::Stacked,
             area_fit: true,
             usage: Tracker::default(),
         }
@@ -216,7 +245,7 @@ impl App {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Esc if self.popup => self.quit = true,
             KeyCode::Char('r') => self.refresh_requested = true,
-            KeyCode::Char('s') if self.view == ViewKind::Area => self.area_stacked = !self.area_stacked,
+            KeyCode::Char('s') if self.view == ViewKind::Area => self.area_mode = self.area_mode.next(),
             KeyCode::Char('u') => {
                 self.bands = !self.bands;
                 self.lane_scroll = 0;
@@ -240,61 +269,6 @@ impl App {
     }
 }
 
-/// Viridis, as 11 evenly spaced stops; colors between are interpolated.
-const VIRIDIS: [(u8, u8, u8); 11] = [
-    (0x44, 0x01, 0x54),
-    (0x48, 0x24, 0x75),
-    (0x41, 0x44, 0x87),
-    (0x35, 0x5f, 0x8d),
-    (0x2a, 0x78, 0x8e),
-    (0x21, 0x91, 0x8c),
-    (0x22, 0xa8, 0x84),
-    (0x44, 0xbf, 0x70),
-    (0x7a, 0xd1, 0x51),
-    (0xbd, 0xdf, 0x26),
-    (0xfd, 0xe7, 0x25),
-];
-/// Darkest viridis position used: below this the purples vanish on a dark terminal.
-const VIRIDIS_FROM: f64 = 0.25;
-
-/// Viridis at `t` in 0..=1.
-fn viridis(t: f64) -> (u8, u8, u8) {
-    let x = t.clamp(0.0, 1.0) * (VIRIDIS.len() - 1) as f64;
-    let i = (x.floor() as usize).min(VIRIDIS.len() - 2);
-    let f = x - i as f64;
-    let (a, b) = (VIRIDIS[i], VIRIDIS[i + 1]);
-    let lerp = |p: u8, q: u8| (f64::from(p) + (f64::from(q) - f64::from(p)) * f).round() as u8;
-    (lerp(a.0, b.0), lerp(a.1, b.1), lerp(a.2, b.2))
-}
-
-/// Color of agent `k` of `n` (visible lanes, in order): spread evenly over viridis from
-/// `VIRIDIS_FROM` to yellow, so the first agent (the base of a stack) is blue-purple and the last
-/// yellow.
-fn series_rgb(k: usize, n: usize) -> (u8, u8, u8) {
-    let t = if n <= 1 { 0.5 } else { k as f64 / (n - 1) as f64 };
-    viridis(VIRIDIS_FROM + (1.0 - VIRIDIS_FROM) * t)
-}
-
-/// Viridis at `t` in 0..=1, the full range: for sequential scales such as HEAT's.
-pub fn viridis_color(t: f64) -> Color {
-    let (r, g, b) = viridis(t);
-    Color::Rgb(r, g, b)
-}
-
-pub fn series_color(k: usize, n: usize) -> Color {
-    let (r, g, b) = series_rgb(k, n);
-    Color::Rgb(r, g, b)
-}
-
-pub fn status_color(s: AgentStatus) -> Color {
-    match s {
-        AgentStatus::Working => Color::Green,
-        AgentStatus::Blocked => Color::Red,
-        AgentStatus::Done => Color::Blue,
-        AgentStatus::Idle | AgentStatus::Unknown => Color::DarkGray,
-    }
-}
-
 pub fn line_glyph(s: AgentStatus, orient: Orient) -> char {
     match (s, orient) {
         (AgentStatus::Working | AgentStatus::Blocked | AgentStatus::Done, Orient::Horizontal) => '━',
@@ -308,10 +282,10 @@ pub fn line_glyph(s: AgentStatus, orient: Orient) -> char {
 
 pub fn node_glyph(mark: Mark) -> (char, Color) {
     match mark {
-        Mark::Created => ('◆', Color::Cyan),
-        Mark::Seen => ('◇', Color::Cyan),
-        Mark::Status(s) => ('●', status_color(s)),
-        Mark::Closed | Mark::Exited => ('✕', Color::Gray),
+        Mark::Created => ('◆', theme().created),
+        Mark::Seen => ('◇', theme().seen),
+        Mark::Status(s) => ('●', theme().status(s)),
+        Mark::Closed | Mark::Exited => ('✕', theme().closed),
     }
 }
 
@@ -383,11 +357,11 @@ fn bend(orient: Orient, up: bool, heavy: bool) -> (char, char, char) {
 }
 
 fn line_cell(s: AgentStatus, orient: Orient) -> Cell {
-    Some((line_glyph(s, orient), status_color(s)))
+    Some((line_glyph(s, orient), theme().status(s)))
 }
 
 fn head_cell(s: AgentStatus, orient: Orient) -> Cell {
-    Some((head_glyph(orient), status_color(s)))
+    Some((head_glyph(orient), theme().status(s)))
 }
 
 fn mark_rank(m: Mark) -> u8 {
@@ -433,6 +407,35 @@ pub fn put_str(buf: &mut Buffer, area: Rect, x: u16, y: u16, s: &str, style: Sty
 
 fn hms(ms: i64) -> String {
     Local.timestamp_millis_opt(ms).single().map_or_else(|| "--:--:--".into(), |t| t.format("%H:%M:%S").to_string())
+}
+
+/// Round steps for time-axis ticks, in seconds.
+const TICK_STEPS_S: [i64; 15] = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 21600];
+
+/// Ticks for a time axis of `cells` cells of `cell_ms` each from `start_ms`, as (cell, label):
+/// the smallest round step whose labels keep apart (a label plus `┊` and a gap across ↔, four rows
+/// down ↕), on multiples of the step in local time. Labels read `HH:MM`, with seconds only when
+/// the step is under a minute.
+fn time_ticks(start_ms: i64, cell_ms: f64, cells: usize, horizontal: bool) -> Vec<(usize, String)> {
+    let offset_ms = Local.timestamp_millis_opt(start_ms).single().map_or(0, |t| i64::from(t.offset().local_minus_utc()) * 1000);
+    let fits = |step_s: i64| {
+        let label_w = if step_s < 60 { 8 } else { 5 };
+        let gap = if horizontal { label_w + 3 } else { 4 };
+        (step_s * 1000) as f64 >= gap as f64 * cell_ms
+    };
+    let step_s = TICK_STEPS_S.iter().copied().find(|&s| fits(s)).unwrap_or(TICK_STEPS_S[TICK_STEPS_S.len() - 1]);
+    let step = step_s * 1000;
+    let format = if step_s < 60 { "%H:%M:%S" } else { "%H:%M" };
+    let first = (start_ms + offset_ms + step - 1).div_euclid(step) * step - offset_ms;
+    (0..)
+        .map(|i| first + i * step)
+        .map(|t| (((t - start_ms) as f64 / cell_ms).floor() as usize, t))
+        .take_while(|&(cell, _)| cell < cells)
+        .map(|(cell, t)| {
+            let label = Local.timestamp_millis_opt(t).single().map_or_else(|| "--:--".into(), |lt| lt.format(format).to_string());
+            (cell, label)
+        })
+        .collect()
 }
 
 fn fmt_bucket(s: i64) -> String {
@@ -521,7 +524,7 @@ impl Grid {
             app.lane_scroll = sel + 1 - slots;
         }
         let n = self.n();
-        let dim = Style::new().fg(Color::DarkGray);
+        let dim = Style::new().fg(theme().dim);
         for (slot, (k, &li)) in lanes.iter().enumerate().skip(app.lane_scroll).take(slots).enumerate() {
             let lane = &app.state.lanes[li];
             let mut label_style = if lane.is_open() { Style::new() } else { dim };
@@ -536,7 +539,7 @@ impl Grid {
                             buf[(cx, y)].set_style(Style::new().add_modifier(Modifier::REVERSED));
                         }
                     }
-                    let (glyph, gs) = if lane.is_open() { ('●', Style::new().fg(status_color(lane.status))) } else { ('✕', dim) };
+                    let (glyph, gs) = if lane.is_open() { ('●', Style::new().fg(theme().status(lane.status))) } else { ('✕', dim) };
                     put_str(buf, self.body, x, y, &glyph.to_string(), gs.patch(label_style));
                     put_str(buf, self.body, x + 2, y, &truncate(lane.label(), 13), label_style);
                     let ws = truncate(app.state.workspace_label(li), 6);
@@ -553,7 +556,7 @@ impl Grid {
                 }
             }
             // Lines and bends take the agent's color; nodes and the head keep their status colors.
-            let agent = series_color(k, lanes.len());
+            let agent = theme().series_color(k, lanes.len());
             let mut prev: Option<u8> = None;
             for (i, pt) in pts(lane, &app.usage, n).into_iter().enumerate().take(n) {
                 let Some((mut ch, mut color)) = pt.cell else {
@@ -593,7 +596,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
     let [header, body, detail, footer] =
         Layout::vertical([Constraint::Length(1), Constraint::Min(1), Constraint::Length(1), Constraint::Length(1)])
             .areas(area);
-    let dim = Style::new().fg(Color::DarkGray);
+    let dim = Style::new().fg(theme().dim);
     let lanes = app.state.visible_lanes();
     app.selected = app.selected.min(lanes.len().saturating_sub(1));
     if app.view.timed() && app.follow {
@@ -619,7 +622,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
         Span::raw(" · "),
         Span::styled(
             app.view.name(),
-            Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::new().fg(theme().accent).add_modifier(Modifier::BOLD),
         ),
         Span::raw(if horizontal { " · ↔" } else { " · ↕" }),
         Span::raw(format!(" · {} agents", lanes.len())),
@@ -634,13 +637,17 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
     }
     spans.push(Span::raw(format!(" · follow {}", if app.follow { '●' } else { '○' })));
     if let Some(err) = &app.error {
-        spans.push(Span::styled(format!(" · herdr socket unavailable: {err} — retrying"), Style::new().fg(Color::Red)));
+        spans.push(Span::styled(format!(" · herdr socket unavailable: {err} — retrying"), Style::new().fg(theme().error)));
+    }
+    if let [first, rest @ ..] = theme_problems() {
+        let more = if rest.is_empty() { String::new() } else { format!(" (+{} more)", rest.len()) };
+        spans.push(Span::styled(format!(" · theme.toml {first}{more}"), Style::new().fg(theme().error)));
     }
     render_line(Line::from(spans), header, buf);
 
     if let Some(&li) = lanes.get(app.selected) {
         let lane = &app.state.lanes[li];
-        let color = status_color(lane.status);
+        let color = theme().status(lane.status);
         let glyph = if lane.is_open() { '●' } else { '✕' };
         let when = match lane.closed_ms {
             None => format!(" {}", fmt_dur(app.now_ms - lane.last_ms())),
@@ -671,7 +678,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
         let (lane_keys, scroll_keys) = if horizontal { ("j/k", "h/l") } else { ("h/l", "j/k") };
         let zoom = if app.view.timed() { " · +/- zoom" } else { "" };
         let extra = match app.view {
-            ViewKind::Area => " · s stack",
+            ViewKind::Area => " · s stack/overlay/stream",
             ViewKind::Time | ViewKind::Sequence => " · u usage",
             ViewKind::Heat | ViewKind::Dash => "",
         };
@@ -750,13 +757,19 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn series_spread_over_viridis() {
-        assert_eq!(viridis(0.0), (0x44, 0x01, 0x54));
-        assert_eq!(viridis(1.0), (0xfd, 0xe7, 0x25));
-        assert_eq!(viridis(0.5), (0x21, 0x91, 0x8c));
-        assert_eq!(series_rgb(1, 2), (0xfd, 0xe7, 0x25), "top series is yellow");
-        assert_eq!(series_rgb(0, 2), viridis(VIRIDIS_FROM), "base skips the darkest purples");
-        assert_eq!(series_rgb(1, 3), viridis(VIRIDIS_FROM + (1.0 - VIRIDIS_FROM) / 2.0));
+    fn time_ticks_pick_round_steps_that_keep_labels_apart() {
+        // 15 s cells across ↔: `┊HH:MM` plus a gap needs 8 cells, so ticks every 2 minutes.
+        let start = 1_794_529_561_427;
+        let ticks = time_ticks(start, 15_000.0, 100, true);
+        assert!(ticks.len() >= 11, "{ticks:?}");
+        assert!(ticks.windows(2).all(|w| w[1].0 - w[0].0 == 8), "{ticks:?}");
+        assert!(ticks.iter().all(|(_, l)| l.len() == 5 && l[3..].parse::<u32>().unwrap() % 2 == 0), "{ticks:?}");
+        // 1 s cells: seconds show, every 15 s (8 + 3 cells needed).
+        let ticks = time_ticks(start, 1000.0, 60, true);
+        assert!(ticks.iter().all(|(_, l)| l.len() == 8 && l[6..].parse::<u32>().unwrap() % 15 == 0), "{ticks:?}");
+        // Down ↕ only rows matter: 4 rows of 15 s → every minute.
+        let ticks = time_ticks(start, 15_000.0, 40, false);
+        assert!(ticks.windows(2).all(|w| w[1].0 - w[0].0 == 4), "{ticks:?}");
     }
 
     #[test]
@@ -764,9 +777,9 @@ pub(crate) mod tests {
         use AgentStatus::*;
         let s = |at_ms, mark, status| Step { at_ms, mark, status };
         let both = [s(0, Mark::Status(Working), Working), s(1, Mark::Status(Blocked), Blocked)];
-        assert_eq!(node_cell(&both), Some(('◉', Color::Red)));
+        assert_eq!(node_cell(&both), Some(('◉', theme().blocked)));
         let closed = [s(0, Mark::Status(Working), Working), s(1, Mark::Closed, Working)];
-        assert_eq!(node_cell(&closed), Some(('✕', Color::Gray)));
+        assert_eq!(node_cell(&closed), Some(('✕', theme().closed)));
         assert_eq!(node_cell(&[]), None);
     }
 }

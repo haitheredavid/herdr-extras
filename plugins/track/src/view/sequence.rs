@@ -3,10 +3,10 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Color;
 
 use super::{App, Grid, Orient, Pt, Scale, head_cell, line_cell, node_glyph};
 use crate::model::Lane;
+use crate::theme::theme;
 use crate::usage::Tracker;
 
 /// Cells per step: the node, then connectors in the status it set.
@@ -35,7 +35,7 @@ fn pts(lane: &Lane, usage: &Tracker, scale: Scale, now_ms: i64, n: usize, seq_ba
     let mut out: Vec<Pt> = Vec::with_capacity(n);
     if first > 0 {
         let s = &lane.steps[first];
-        out.push(Pt { cell: Some(('…', Color::DarkGray)), level: level_at(s.at_ms), status: Some(s.status) });
+        out.push(Pt { cell: Some(('…', theme().dim)), level: level_at(s.at_ms), status: Some(s.status) });
     }
     for k in first..end {
         let s = &lane.steps[k];

@@ -3,6 +3,7 @@ mod history;
 mod model;
 mod open;
 mod record;
+mod theme;
 mod usage;
 mod view;
 

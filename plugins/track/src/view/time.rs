@@ -2,10 +2,11 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 
-use super::{App, Cell, Grid, Orient, Pt, Scale, head_cell, hms, line_cell, node_cell, put_str};
+use super::{App, Cell, Grid, Orient, Pt, Scale, head_cell, line_cell, node_cell, put_str, time_ticks};
 use crate::model::{Lane, status_at};
+use crate::theme::theme;
 use crate::usage::Tracker;
 
 /// Vertical axis gutter: `HH:MM:SS` plus a space.
@@ -61,17 +62,11 @@ fn pts(lane: &Lane, usage: &Tracker, scale: Scale, start: i64, bucket: i64, n: u
 
 /// Axis labels sit on absolute bucket multiples so they scroll with time.
 pub(super) fn draw_axis(buf: &mut Buffer, grid: &Grid, start: i64, bucket: i64) {
-    let (every, prefix) = match grid.orient {
-        Orient::Horizontal => (12, "┊"),
-        Orient::Vertical => (6, ""),
-    };
-    let dim = Style::new().fg(Color::DarkGray);
-    for i in 0..grid.n() {
-        let t0 = start + i as i64 * bucket;
-        if (t0 / bucket).rem_euclid(every) == 0 {
-            let (x, y) = grid.axis_pos(i);
-            put_str(buf, grid.body, x, y, &format!("{prefix}{}", hms(t0)), dim);
-        }
+    let horizontal = grid.orient == Orient::Horizontal;
+    let dim = Style::new().fg(theme().dim);
+    for (i, label) in time_ticks(start, bucket as f64, grid.n(), horizontal) {
+        let (x, y) = grid.axis_pos(i);
+        put_str(buf, grid.body, x, y, &if horizontal { format!("┊{label}") } else { label }, dim);
     }
 }
 
@@ -105,9 +100,9 @@ mod tests {
         // Header, axis row, lane row, detail, footer.
         let buf = render(&mut app, GUTTER + 12, 5);
         assert_eq!(row(&buf, 2, GUTTER, GUTTER + 12), "◆─●━━●━━▸");
-        assert_eq!(buf[(GUTTER + 8, 2)].fg, Color::Red, "head in the current status color");
-        assert_eq!(buf[(GUTTER + 1, 2)].fg, super::super::series_color(0, 1), "lines take the agent's color");
-        assert_eq!(buf[(GUTTER + 2, 2)].fg, Color::Green, "status nodes keep status colors");
+        assert_eq!(buf[(GUTTER + 8, 2)].fg, theme().blocked, "head in the current status color");
+        assert_eq!(buf[(GUTTER + 1, 2)].fg, theme().series_color(0, 1), "lines take the agent's color");
+        assert_eq!(buf[(GUTTER + 2, 2)].fg, theme().working, "status nodes keep status colors");
         assert!(row(&buf, 0, 0, GUTTER + 12).starts_with("track · TIME · ↔"));
     }
 

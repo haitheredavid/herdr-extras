@@ -3,10 +3,11 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 
 use super::time::{AXIS_W, draw_axis, start_ms};
-use super::{App, Grid, Orient, Pt, put_str, viridis_color};
+use super::{App, Grid, Orient, Pt, put_str};
+use crate::theme::theme;
 use crate::model::{Lane, status_time};
 
 fn pts(lane: &Lane, start: i64, bucket: i64, n: usize, now_ms: i64) -> Vec<Pt> {
@@ -18,9 +19,9 @@ fn pts(lane: &Lane, start: i64, bucket: i64, n: usize, now_ms: i64) -> Vec<Pt> {
                 .filter(|st| st.alive_ms > 0)
                 .map(|st| {
                     let color = if st.blocked_ms > 0 {
-                        Color::Red
+                        theme().heat_blocked
                     } else {
-                        viridis_color(st.working_ms as f64 / st.alive_ms as f64)
+                        theme().heat_color(st.working_ms as f64 / st.alive_ms as f64)
                     };
                     ('█', color)
                 });
@@ -39,11 +40,11 @@ pub fn render(buf: &mut Buffer, body: Rect, app: &mut App, lanes: &[usize]) {
     draw_axis(buf, &grid, start, bucket);
 
     // Scale key in the corner the axis leaves free.
-    let dim = Style::new().fg(Color::DarkGray);
-    let steps = if horizontal { 10 } else { 7 };
+    let dim = Style::new().fg(theme().dim);
+    let steps = if horizontal { 10 } else { 6 };
     let mut x = put_str(buf, body, body.x, body.y, if horizontal { "idle " } else { "0" }, dim);
     for i in 0..steps {
-        x = put_str(buf, body, x, body.y, "█", Style::new().fg(viridis_color(i as f64 / (steps - 1) as f64)));
+        x = put_str(buf, body, x, body.y, "█", Style::new().fg(theme().heat_color(i as f64 / (steps - 1) as f64)));
     }
     put_str(buf, body, x, body.y, if horizontal { " work" } else { "1" }, dim);
 
@@ -64,8 +65,8 @@ mod tests {
         let buf = render(&mut app, GUTTER + 12, 5);
         assert_eq!(row(&buf, 2, GUTTER, GUTTER + 12), "█████████", "one cell per second up to now");
         let fg = |i: u16| buf[(GUTTER + i, 2)].fg;
-        assert_eq!(fg(0), viridis_color(0.0), "idle");
-        assert_eq!(fg(3), viridis_color(1.0), "working the whole second");
-        assert_eq!(fg(6), Color::Red, "blocked");
+        assert_eq!(fg(0), theme().heat_color(0.0), "idle");
+        assert_eq!(fg(3), theme().heat_color(1.0), "working the whole second");
+        assert_eq!(fg(6), theme().heat_blocked, "blocked");
     }
 }
