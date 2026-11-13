@@ -1,7 +1,8 @@
 //! Color tokens: every color the views draw with, defined once. The defaults below are the
 //! built-in look; `theme.toml` in the plugin config dir (`$HERDR_PLUGIN_CONFIG_DIR`) overrides any
 //! of them. Colors are ratatui color strings: a name (`green`, `darkgray`), `#rrggbb`, or a
-//! 0-255 palette index. Ramps and `background` must be `#rrggbb`, since fills are mixed from them.
+//! 0-255 palette index. The `series` ramp and `background` must be `#rrggbb`, since fills are mixed
+//! from them.
 
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -37,12 +38,11 @@ pub struct Theme {
     pub created: Color,
     pub seen: Color,
     pub closed: Color,
-    /// Ramp agents take their colors from, spread evenly from `series_from` to its end.
+    /// The one color ramp: agents are spread evenly along it from `series_from` to its end, and
+    /// HEAT shades along the same stretch.
     pub series: Vec<(u8, u8, u8)>,
-    /// Where along `series` the first agent sits; skips ramp starts too dark for the background.
+    /// Where along `series` the used stretch starts; skips ramp starts too dark for the background.
     pub series_from: f64,
-    /// Ramp for HEAT's working share, 0% to 100%.
-    pub heat: Vec<(u8, u8, u8)>,
     /// HEAT cells where the agent was blocked.
     pub heat_blocked: Color,
     /// How much of a series' color its fill lays over what is behind (0-1).
@@ -66,9 +66,8 @@ impl Default for Theme {
             created: Color::Cyan,
             seen: Color::Cyan,
             closed: Color::Gray,
-            series: viridis.clone(),
+            series: viridis,
             series_from: 0.25,
-            heat: viridis,
             heat_blocked: Color::Red,
             fill_alpha: 0.3,
         }
@@ -122,14 +121,19 @@ impl Theme {
         }
     }
 
-    /// Color of agent `k` of `n` (visible lanes, in order), spread evenly along `series`.
-    pub fn series_color(&self, k: usize, n: usize) -> Color {
-        let t = if n <= 1 { 0.5 } else { k as f64 / (n - 1) as f64 };
-        ramp(&self.series, self.series_from + (1.0 - self.series_from) * t)
+    /// The used stretch of `series` at `t` in 0..=1.
+    fn along(&self, t: f64) -> Color {
+        ramp(&self.series, self.series_from + (1.0 - self.series_from) * t.clamp(0.0, 1.0))
     }
 
+    /// Color of agent `k` of `n` (visible lanes, in order), spread evenly along the ramp.
+    pub fn series_color(&self, k: usize, n: usize) -> Color {
+        self.along(if n <= 1 { 0.5 } else { k as f64 / (n - 1) as f64 })
+    }
+
+    /// HEAT's color for a working share, 0% to 100%, along the same stretch as agent colors.
     pub fn heat_color(&self, share: f64) -> Color {
-        ramp(&self.heat, share)
+        self.along(share)
     }
 
     /// Applies the keys of a `theme.toml`; returns one message per key it couldn't use.
@@ -178,7 +182,6 @@ impl Theme {
             "error" => self.error = color()?,
             "heat_blocked" => self.heat_blocked = color()?,
             "series" => self.series = ramp()?,
-            "heat" => self.heat = ramp()?,
             "series_from" => self.series_from = fraction()?,
             "fill_alpha" => self.fill_alpha = fraction()?,
             "status" | "node" => return Err("expected a table".into()),
@@ -252,7 +255,8 @@ mod tests {
         assert_eq!(ramp(&t.series, 0.5), Color::Rgb(0x21, 0x91, 0x8c));
         assert_eq!(t.series_color(1, 2), Color::Rgb(0xfd, 0xe7, 0x25), "last agent at the ramp's end");
         assert_eq!(t.series_color(0, 2), ramp(&t.series, 0.25));
-        assert_eq!(t.heat_color(0.0), Color::Rgb(0x44, 0x01, 0x54), "heat uses the whole ramp");
+        assert_eq!(t.heat_color(0.0), t.series_color(0, 2), "heat starts where agent colors do");
+        assert_eq!(t.heat_color(1.0), t.series_color(1, 2), "and ends where they do");
     }
 
     #[test]
@@ -284,10 +288,10 @@ mod tests {
 
     #[test]
     fn ramps_must_be_rgb() {
-        let table: Table = r##"heat = ["red", "#ffffff"]"##.parse().unwrap();
+        let table: Table = r##"series = ["red", "#ffffff"]"##.parse().unwrap();
         let mut t = Theme::default();
         assert_eq!(t.apply(&table).len(), 1);
-        assert_eq!(t.heat, Theme::default().heat);
+        assert_eq!(t.series, Theme::default().series);
     }
 
     #[test]

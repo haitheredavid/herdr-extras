@@ -1,5 +1,6 @@
-//! Heat view: one row (↔) or column (↕) per agent, one cell per time bucket, colored along viridis
-//! by the share of the bucket the agent spent working; red where it was blocked at all.
+//! Heat view: one row (↔) or column (↕) per agent, one cell per time bucket, shaded along the
+//! theme's ramp (the same stretch agent colors use) by the share of the bucket the agent spent
+//! working; `heat_blocked` where it was blocked at all.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
