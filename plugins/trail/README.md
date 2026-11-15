@@ -283,8 +283,10 @@ Every agent herdr detects gets a lane with its state. Usage and the timeline com
 | --- | --- | --- | --- | --- |
 | omp | yes | yes | yes, including subagents and side calls | yes |
 | Claude Code | yes | yes | no | yes |
-| Codex | yes | yes | no | yes |
+| Codex | yes¹ | yes¹ | no | yes¹ |
 | others | no | no | no | status only |
+
+¹ Only when herdr knows the pane's Codex session. With recent Codex releases (seen with `codex-cli 0.169.0` and herdr's Codex integration v10), herdr can miss it and the lane stays status-only; see [Codex lanes stay status-only](#codex-lanes-stay-status-only).
 
 ## Configuration
 
@@ -376,6 +378,16 @@ closed = "gray"
 - `herdr protocol N untested (built for 22)` means herdr is newer than this build; it keeps working but may miss fields.
 - An agent's lane shows ctx `–` and its timeline says `no session file: herdr status only`: herdr hasn't received that pane's session. Check `herdr integration status`, then `herdr api snapshot | jq '.result.snapshot.panes[] | {pane_id, agent, agent_session}'`. If `agent_session` is `null` with the integration installed, the agent's session-start hook didn't report it, and the lane stays status-only for that session.
 - To force a source build (no download): `HERDR_TRAIL_BUILD=source sh scripts/install.sh` in the plugin directory.
+
+### Codex lanes stay status-only
+
+A Codex lane shows its state but ctx `–`, and its timeline says `no session file: herdr status only`, even with `herdr integration status` reporting `codex: current`. This is a herdr/Codex interaction, not a trail setting:
+
+- trail reads a Codex session only after herdr tells it which session runs in the pane. herdr learns that from its Codex `SessionStart` hook (`~/.codex/herdr-agent-state.sh`), which reports the session for the pane named by `$HERDR_PANE_ID`.
+- Recent Codex releases run sessions through a long-lived background process (`codex app-server`), and hooks run as its children. Its `$HERDR_PANE_ID` is that of the pane where the background process first started, not the pane you're running `codex` in. herdr receives the report for a pane that usually no longer exists and drops it.
+- To check: `herdr api snapshot | jq '.result.snapshot.panes[] | select(.agent=="codex") | .agent_session'` prints `null`, and `ps -axo pid,lstart,command | grep 'codex app-server'` shows a process older than your Codex session.
+
+There's no trail-side fix yet: trail doesn't guess which rollout file belongs to which pane, since two Codex panes in one folder would be confused. Codex panes keep their herdr state (working, blocked, idle) on every lane. Usage needs a fix in herdr's Codex integration or in Codex.
 
 ## Uninstall
 

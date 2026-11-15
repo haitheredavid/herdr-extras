@@ -29,3 +29,7 @@ First release as `herdr-trail` (formerly `track`).
 
 - Renamed the plugin from `track` to `trail` (id `herdr-trail`).
 - The band follows focus into the tab you switch to, keeping its view.
+
+### Known issues
+
+- Codex lanes can stay status-only with recent Codex releases: Codex runs its session hooks from a background process, so herdr's integration reports the session for the wrong pane and herdr never learns it. See the README's troubleshooting section.
