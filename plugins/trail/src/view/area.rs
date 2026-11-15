@@ -21,13 +21,13 @@ const END_ROWS: u16 = 2;
 
 /// Fill where the series `ks` cover a cell, back to front: each lays its color at the theme's
 /// `fill_alpha` over what is behind it, so overlapping areas show through each other.
-fn fill(ks: impl IntoIterator<Item = usize>, n: usize) -> Option<Color> {
+fn fill(slots: impl IntoIterator<Item = usize>) -> Option<Color> {
     let t = theme();
-    ks.into_iter().fold(None, |behind, k| Some(mix(behind.unwrap_or(t.background), t.series_color(k, n), t.fill_alpha)))
+    slots.into_iter().fold(None, |behind, s| Some(mix(behind.unwrap_or(t.background), t.agent_color(s), t.fill_alpha)))
 }
 
-fn fill_color(k: usize, n: usize) -> Color {
-    fill([k], n).unwrap_or(Color::Reset)
+fn fill_color(slot: usize) -> Color {
+    fill([slot]).unwrap_or(Color::Reset)
 }
 
 /// Smallest 1, 1.5, 2, 2.5, 3, 4, 5, 6 or 8 × 10ⁿ at or above `v`.
@@ -68,7 +68,10 @@ impl Canvas {
 
 /// One agent's values per time dot (None outside its life or before any usage).
 struct Series {
+    /// Row index, for labels and selection.
     k: usize,
+    /// Agent palette slot, for colors.
+    slot: usize,
     vals: Vec<Option<u64>>,
 }
 
@@ -165,7 +168,6 @@ fn value_at(lane: &Lane, usage: &Tracker, at: i64) -> Option<u64> {
 
 pub fn render(buf: &mut Buffer, body: Rect, app: &mut App, lanes: &[usize]) {
     let horizontal = app.orient == Orient::Horizontal;
-    let n = lanes.len();
     let dim = Style::new().fg(theme().dim);
     // ↔: legend row, chart, time-axis row; value axis left, end labels right.
     // ↕: legend row, value-axis row, chart, two end-label rows; time axis left.
@@ -196,7 +198,7 @@ pub fn render(buf: &mut Buffer, body: Rect, app: &mut App, lanes: &[usize]) {
                     (t0 <= now).then(|| value_at(lane, &app.usage, (t0 + dot_ms - 1).min(now))).flatten()
                 })
                 .collect();
-            Series { k, vals }
+            Series { k, slot: lane.slot.unwrap_or(0), vals }
         })
         .collect();
     let mode = app.area_mode;
@@ -237,14 +239,16 @@ pub fn render(buf: &mut Buffer, body: Rect, app: &mut App, lanes: &[usize]) {
     let max = nice_ceil(peak);
 
     // Legend.
+    let sel = app.sel_row(lanes);
     let mut x = body.x;
     for (k, &li) in lanes.iter().enumerate() {
         let lane = &app.state.lanes[li];
-        let mut style = Style::new().fg(theme().series_color(k, n));
-        if k == app.selected {
+        let color = theme().agent_color(lane.slot.unwrap_or(0));
+        let mut style = Style::new().fg(color);
+        if Some(k) == sel {
             style = style.add_modifier(Modifier::REVERSED);
         }
-        x = put_str(buf, body, x, body.y, "■ ", Style::new().fg(theme().series_color(k, n)));
+        x = put_str(buf, body, x, body.y, "■ ", Style::new().fg(color));
         x = put_str(buf, body, x, body.y, &truncate(lane.label(), 14), style) + 2;
     }
     put_str(buf, body, x, body.y, mode.name(), dim);
@@ -267,15 +271,15 @@ pub fn render(buf: &mut Buffer, body: Rect, app: &mut App, lanes: &[usize]) {
             let mut covering =
                 bands.iter().enumerate().filter(|(_, b)| b[t].is_some_and(|(lo, hi)| to_dot(lo) <= v && v <= to_dot(hi)));
             canvas.bg[row * canvas.cols + col] = match mode {
-                AreaMode::Overlaid => fill(covering.map(|(i, _)| series[i].k), n),
-                AreaMode::Stacked | AreaMode::Stream => covering.next().map(|(i, _)| fill_color(series[i].k, n)),
+                AreaMode::Overlaid => fill(covering.map(|(i, _)| series[i].slot)),
+                AreaMode::Stacked | AreaMode::Stream => covering.next().map(|(i, _)| fill_color(series[i].slot)),
             };
         }
     }
     // Each series' upper edge; a stream also outlines its lower edge, in the color of the lowest
     // series present at each time.
     for (i, s) in series.iter().enumerate() {
-        let color = theme().series_color(s.k, n);
+        let color = theme().agent_color(s.slot);
         let edge: Vec<Option<(usize, Color)>> = bands[i].iter().map(|b| b.map(|(_, hi)| (to_dot(hi), color))).collect();
         trace(&mut canvas, &plot, &edge);
     }
@@ -283,7 +287,7 @@ pub fn render(buf: &mut Buffer, body: Rect, app: &mut App, lanes: &[usize]) {
         let base: Vec<Option<(usize, Color)>> = (0..t_dots)
             .map(|t| {
                 let (i, (lo, _)) = bands.iter().enumerate().find_map(|(i, b)| b[t].map(|band| (i, band)))?;
-                Some((to_dot(lo), theme().series_color(series[i].k, n)))
+                Some((to_dot(lo), theme().agent_color(series[i].slot)))
             })
             .collect();
         trace(&mut canvas, &plot, &base);
@@ -353,7 +357,7 @@ pub fn render(buf: &mut Buffer, body: Rect, app: &mut App, lanes: &[usize]) {
     // End labels at each line's last point.
     let last_t = (0..t_dots).rev().find(|&t| bands.iter().any(|b| b[t].is_some()));
     let Some(last_t) = last_t else { return };
-    let mut ends: Vec<(u16, u16, usize, u64)> = series
+    let mut ends: Vec<(u16, u16, usize, usize, u64)> = series
         .iter()
         .enumerate()
         .filter_map(|(i, s)| {
@@ -362,14 +366,14 @@ pub fn render(buf: &mut Buffer, body: Rect, app: &mut App, lanes: &[usize]) {
             let at = if mode == AreaMode::Stream { (lo + hi) / 2.0 } else { hi };
             let (sx, sy) = plot.screen(last_t, to_dot(at));
             let (x, y) = plot.cell_pos(sx, sy);
-            Some((x, y, s.k, s.vals[last_t].unwrap_or(0)))
+            Some((x, y, s.k, s.slot, s.vals[last_t].unwrap_or(0)))
         })
         .collect();
     match plot.orient {
         Orient::Horizontal if label_w > 0 => {
             ends.sort_by_key(|e| e.1);
             let mut used: Vec<u16> = Vec::new();
-            for (_, y, k, val) in ends {
+            for (_, y, k, slot, val) in ends {
                 let mut y = y;
                 while used.contains(&y) && y + 1 < plot.area.bottom() {
                     y += 1;
@@ -377,7 +381,7 @@ pub fn render(buf: &mut Buffer, body: Rect, app: &mut App, lanes: &[usize]) {
                 used.push(y);
                 let name = truncate(app.state.lanes[lanes[k]].label(), (LABEL_W - 7) as usize);
                 let x = plot.area.right() + 1;
-                put_str(buf, body, x, y, &format!("{name} {}", fmt_tokens(val)), Style::new().fg(theme().series_color(k, n)));
+                put_str(buf, body, x, y, &format!("{name} {}", fmt_tokens(val)), Style::new().fg(theme().agent_color(slot)));
             }
         }
         Orient::Vertical => {
@@ -385,14 +389,14 @@ pub fn render(buf: &mut Buffer, body: Rect, app: &mut App, lanes: &[usize]) {
             ends.sort_by_key(|e| e.0);
             // Free x per row; each label takes the first row it fits in, at its line's x.
             let mut free = vec![body.x; END_ROWS as usize];
-            for (x, _, k, val) in ends {
+            for (x, _, k, slot, val) in ends {
                 let name = truncate(app.state.lanes[lanes[k]].label(), 8);
                 let text = format!("{name} {}", fmt_tokens(val));
                 let len = text.chars().count() as u16;
                 let x = x.min(body.right().saturating_sub(len));
                 let Some(row) = free.iter().position(|&f| f <= x) else { continue };
                 free[row] = x + len + 1;
-                put_str(buf, body, x, first + row as u16, &text, Style::new().fg(theme().series_color(k, n)));
+                put_str(buf, body, x, first + row as u16, &text, Style::new().fg(theme().agent_color(slot)));
             }
         }
         _ => {}
@@ -414,6 +418,7 @@ mod tests {
         let mut app = sample_app(ViewKind::Area, orient);
         let i = app.state.open("w1:p2", "w1", 0, Mark::Created, AgentStatus::Working, true);
         app.state.lanes[i].agent = Some("claude".into());
+        app.state.assign_slots();
         for (li, ctx) in [(0, 100), (i, 300)] {
             let path = PathBuf::from(format!("/s{li}.jsonl"));
             app.state.lanes[li].sessions.push(path.clone());
@@ -444,11 +449,11 @@ mod tests {
         let x = VAX_W + 2;
         // max 400 over 31 dots: lane 0's top at dot 8 (row 7), the total at dot 31 (row 2).
         assert!(braille(buf[(x, 2)].symbol()), "total line on the top row");
-        assert_eq!(buf[(x, 2)].fg, theme().series_color(1, 2));
+        assert_eq!(buf[(x, 2)].fg, theme().agent_color(1));
         assert!(braille(buf[(x, 7)].symbol()), "lane 0's line at a quarter height");
-        assert_eq!(buf[(x, 7)].fg, theme().series_color(0, 2));
-        assert_eq!(buf[(x, 9)].bg, fill_color(0, 2), "lane 0 fills the base");
-        assert_eq!(buf[(x, 4)].bg, fill_color(1, 2), "lane 1 fills above it");
+        assert_eq!(buf[(x, 7)].fg, theme().agent_color(0));
+        assert_eq!(buf[(x, 9)].bg, fill_color(0), "lane 0 fills the base");
+        assert_eq!(buf[(x, 4)].bg, fill_color(1), "lane 1 fills above it");
         assert_eq!(buf[(0, 2)].symbol().trim(), "", "value labels are right-aligned");
         assert!((0..VAX_W).map(|c| buf[(c, 2)].symbol()).collect::<String>().contains("400"));
     }
@@ -462,12 +467,12 @@ mod tests {
         let x = VAX_W + 2;
         // max 300: lane 1's line on top, lane 0's at a third. Below lane 0's line both areas
         // overlap, lane 0's tint over lane 1's; above it only lane 1's.
-        assert_eq!(buf[(x, 2)].fg, theme().series_color(1, 2));
-        let both = fill([1, 0], 2).unwrap();
+        assert_eq!(buf[(x, 2)].fg, theme().agent_color(1));
+        let both = fill([1, 0]).unwrap();
         assert_eq!(buf[(x, 9)].bg, both, "overlap blends, smaller series in front");
-        assert_ne!(both, fill_color(0, 2));
-        assert_ne!(both, fill_color(1, 2));
-        assert_eq!(buf[(x, 4)].bg, fill_color(1, 2));
+        assert_ne!(both, fill_color(0));
+        assert_ne!(both, fill_color(1));
+        assert_eq!(buf[(x, 4)].bg, fill_color(1));
     }
 
     /// Totals 400: lane 0 holds -200..-100 and lane 1 -100..200 around the center. Rows as in
@@ -481,11 +486,11 @@ mod tests {
         assert_eq!(app.area_mode, AreaMode::Stream);
         let buf = render(&mut app, 60, 13);
         let x = VAX_W + 2;
-        assert!(braille(buf[(x, 9)].symbol()) && buf[(x, 9)].fg == theme().series_color(0, 2), "baseline outline at dot 0");
-        assert!(braille(buf[(x, 7)].symbol()) && buf[(x, 7)].fg == theme().series_color(0, 2), "lane 0's upper edge at dot 8");
-        assert!(braille(buf[(x, 2)].symbol()) && buf[(x, 2)].fg == theme().series_color(1, 2), "lane 1's upper edge at the top");
-        assert_eq!(buf[(x, 8)].bg, fill_color(0, 2));
-        assert_eq!(buf[(x, 4)].bg, fill_color(1, 2));
+        assert!(braille(buf[(x, 9)].symbol()) && buf[(x, 9)].fg == theme().agent_color(0), "baseline outline at dot 0");
+        assert!(braille(buf[(x, 7)].symbol()) && buf[(x, 7)].fg == theme().agent_color(0), "lane 0's upper edge at dot 8");
+        assert!(braille(buf[(x, 2)].symbol()) && buf[(x, 2)].fg == theme().agent_color(1), "lane 1's upper edge at the top");
+        assert_eq!(buf[(x, 8)].bg, fill_color(0));
+        assert_eq!(buf[(x, 4)].bg, fill_color(1));
         let gutter: String = (0..VAX_W).map(|c| buf[(c, 2)].symbol()).collect();
         assert_eq!(gutter, " Σ400┤", "full thickness at the top, right-aligned");
     }
@@ -508,9 +513,9 @@ mod tests {
         let mut app = two_series(Orient::Vertical);
         let buf = render(&mut app, AXIS_W + 8, 12);
         // Chart row 3 (first time row): lane 0's fill at the left, lane 1's line at the right.
-        assert_eq!(buf[(AXIS_W, 3)].bg, fill_color(0, 2));
+        assert_eq!(buf[(AXIS_W, 3)].bg, fill_color(0));
         let right = (AXIS_W..AXIS_W + 8).rev().find(|&x| braille(buf[(x, 3)].symbol())).unwrap();
-        assert_eq!(buf[(right, 3)].fg, theme().series_color(1, 2));
+        assert_eq!(buf[(right, 3)].fg, theme().agent_color(1));
         assert_eq!(right, AXIS_W + 7);
     }
 }

@@ -1,4 +1,5 @@
-//! Herdr socket client: one-shot requests and a long-lived event subscriber.
+//! Herdr socket client: one-shot requests, a long-lived event subscriber, and the wire types of
+//! snapshots and events, mapped onto the model's `HostEvent`.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::Shutdown;
@@ -10,9 +11,164 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, anyhow};
+use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::model::Snapshot;
+use crate::model::{AgentStatus, HostEvent, PaneMeta};
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct Snapshot {
+    #[serde(default)]
+    pub panes: Vec<PaneInfo>,
+    #[serde(default)]
+    pub workspaces: Vec<WorkspaceInfo>,
+    #[serde(default)]
+    pub tabs: Vec<TabInfo>,
+    #[serde(default)]
+    pub focused_workspace_id: Option<String>,
+    #[serde(default)]
+    pub focused_tab_id: Option<String>,
+    #[serde(default)]
+    pub protocol: Option<u32>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct PaneInfo {
+    pub pane_id: String,
+    pub workspace_id: String,
+    #[serde(default)]
+    pub tab_id: Option<String>,
+    /// Stable across pane moves, unlike `pane_id`.
+    #[serde(default)]
+    pub terminal_id: Option<String>,
+    #[serde(default)]
+    pub agent: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Latest OSC terminal title; agents like omp put their current task here.
+    #[serde(default, rename = "terminal_title_stripped")]
+    pub terminal_title: Option<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub agent_status: AgentStatus,
+    #[serde(default)]
+    pub agent_session: Option<AgentSession>,
+}
+
+/// Agent session identity herdr reports, e.g. `{"agent":"omp","kind":"path","source":"herdr:omp","value":"….jsonl"}`.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct AgentSession {
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WorkspaceInfo {
+    pub workspace_id: String,
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TabInfo {
+    pub tab_id: String,
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct PanePayload {
+    pane: PaneInfo,
+}
+
+#[derive(Deserialize)]
+struct PaneRef {
+    pane_id: String,
+}
+
+#[derive(Deserialize)]
+struct DetectedPayload {
+    pane_id: String,
+    #[serde(default)]
+    workspace_id: String,
+    #[serde(default)]
+    agent: Option<String>,
+    #[serde(default)]
+    released: bool,
+}
+
+#[derive(Deserialize)]
+struct StatusPayload {
+    pane_id: String,
+    #[serde(default)]
+    workspace_id: String,
+    agent_status: AgentStatus,
+    #[serde(default)]
+    agent: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct MovedPayload {
+    previous_pane_id: String,
+    pane: PaneInfo,
+}
+
+impl From<&PaneInfo> for PaneMeta {
+    fn from(p: &PaneInfo) -> PaneMeta {
+        PaneMeta {
+            pane_id: p.pane_id.clone(),
+            workspace_id: p.workspace_id.clone(),
+            tab_id: p.tab_id.clone(),
+            terminal_id: p.terminal_id.clone(),
+            agent: p.agent.clone(),
+            title: p.title.clone(),
+            terminal_title: p.terminal_title.clone(),
+            cwd: p.cwd.clone(),
+            status: Some(p.agent_status),
+            session: p
+                .agent_session
+                .as_ref()
+                .filter(|s| s.kind == "path" && !s.value.is_empty())
+                .map(|s| PathBuf::from(&s.value)),
+            ..PaneMeta::default()
+        }
+    }
+}
+
+/// The model event for a live envelope; None for events it doesn't track or payloads that don't parse.
+pub fn host_event(env: &Envelope) -> Option<HostEvent> {
+    let data = env.data.clone();
+    let meta = |pane_id: String, workspace_id: String| PaneMeta { pane_id, workspace_id, ..PaneMeta::default() };
+    Some(match env.event.replace('.', "_").as_str() {
+        "pane_created" => HostEvent::Created((&serde_json::from_value::<PanePayload>(data).ok()?.pane).into()),
+        "pane_updated" => HostEvent::Updated((&serde_json::from_value::<PanePayload>(data).ok()?.pane).into()),
+        "pane_closed" => HostEvent::Closed { pane_id: serde_json::from_value::<PaneRef>(data).ok()?.pane_id },
+        "pane_exited" => HostEvent::Exited { pane_id: serde_json::from_value::<PaneRef>(data).ok()?.pane_id },
+        "pane_agent_detected" => {
+            let p = serde_json::from_value::<DetectedPayload>(data).ok()?;
+            HostEvent::Detected { meta: PaneMeta { agent: p.agent, ..meta(p.pane_id, p.workspace_id) }, released: p.released }
+        }
+        "pane_agent_status_changed" => {
+            let p = serde_json::from_value::<StatusPayload>(data).ok()?;
+            HostEvent::Status(PaneMeta {
+                agent: p.agent,
+                title: p.title,
+                status: Some(p.agent_status),
+                ..meta(p.pane_id, p.workspace_id)
+            })
+        }
+        "pane_moved" => {
+            let p = serde_json::from_value::<MovedPayload>(data).ok()?;
+            HostEvent::Moved { previous_pane_id: p.previous_pane_id, pane: (&p.pane).into() }
+        }
+        _ => return None,
+    })
+}
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 const IO_TIMEOUT: Duration = Duration::from_secs(2);

@@ -69,7 +69,7 @@ mod tests {
         let mut app = sample_app(ViewKind::Sequence, Orient::Horizontal);
         // Header, lane row, detail, footer: no axis row.
         let buf = render(&mut app, GUTTER + 20, 4);
-        assert_eq!(row(&buf, 1, GUTTER, GUTTER + 20), "◆───●━━━●━━━▸");
+        assert_eq!(row(&buf, 1, GUTTER, GUTTER + 20), "◆───●━━━▲╍╍╍▸");
     }
 
     #[test]
@@ -95,6 +95,6 @@ mod tests {
         app.seq_back = 0;
         app.state.close("w1:p1", Mark::Closed, 9000);
         let buf = render(&mut app, GUTTER + 20, 4);
-        assert_eq!(row(&buf, 1, GUTTER, GUTTER + 20), "◆───●━━━●━━━✕");
+        assert_eq!(row(&buf, 1, GUTTER, GUTTER + 20), "◆───●━━━▲╍╍╍✕");
     }
 }

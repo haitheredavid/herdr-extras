@@ -7,7 +7,7 @@ use chrono::{DateTime, Datelike, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::herdr::PLUGIN_ID;
-use crate::model::AgentStatus;
+use crate::model::{AgentStatus, HostEvent, PaneMeta};
 
 /// One line of the history log, written by `herdr-trail record`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -29,6 +29,30 @@ pub struct LogEvent {
     pub agent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<AgentStatus>,
+}
+
+impl LogEvent {
+    /// The model event this line records; None for events the fold doesn't track.
+    pub fn host_event(&self) -> Option<HostEvent> {
+        let meta = PaneMeta {
+            pane_id: self.pane_id.clone(),
+            workspace_id: self.workspace_id.clone(),
+            workspace_label: self.workspace_label.clone(),
+            tab_label: self.tab_label.clone(),
+            cwd: self.cwd.clone(),
+            agent: self.agent.clone(),
+            status: self.status,
+            ..PaneMeta::default()
+        };
+        Some(match self.event.as_str() {
+            "pane.created" => HostEvent::Created(meta),
+            "pane.agent_detected" => HostEvent::Detected { meta, released: false },
+            "pane.agent_status_changed" if self.status.is_some() => HostEvent::Status(meta),
+            "pane.closed" => HostEvent::Closed { pane_id: meta.pane_id },
+            "pane.exited" => HostEvent::Exited { pane_id: meta.pane_id },
+            _ => return None,
+        })
+    }
 }
 
 fn env_nonempty(key: &str) -> Option<String> {

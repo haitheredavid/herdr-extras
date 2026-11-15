@@ -4,7 +4,7 @@
 //! 0-255 palette index. The `series` ramp and `background` must be `#rrggbb`, since fills are mixed
 //! from them.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::str::FromStr;
 use std::sync::LazyLock;
 
@@ -66,7 +66,7 @@ impl Default for Theme {
             seen: Color::Cyan,
             closed: Color::Gray,
             series: viridis,
-            series_from: 0.25,
+            series_from: 0.40,
             heat_blocked: Color::Red,
             fill_alpha: 0.3,
         }
@@ -109,6 +109,27 @@ pub fn mix(under: Color, over: Color, alpha: f64) -> Color {
     }
 }
 
+/// sRGB (D65) to CIELAB.
+fn lab((r, g, b): (u8, u8, u8)) -> (f64, f64, f64) {
+    let lin = |c: u8| {
+        let c = f64::from(c) / 255.0;
+        if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+    };
+    let (r, g, b) = (lin(r), lin(g), lin(b));
+    let x = (0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.95047;
+    let y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    let z = (0.0193 * r + 0.1192 * g + 0.9505 * b) / 1.08883;
+    let f = |t: f64| if t > 216.0 / 24389.0 { t.cbrt() } else { (24389.0 / 27.0 * t + 16.0) / 116.0 };
+    let (fx, fy, fz) = (f(x), f(y), f(z));
+    (116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz))
+}
+
+/// CIE76 color difference.
+fn delta_e(a: (u8, u8, u8), b: (u8, u8, u8)) -> f64 {
+    let (p, q) = (lab(a), lab(b));
+    ((p.0 - q.0).powi(2) + (p.1 - q.1).powi(2) + (p.2 - q.2).powi(2)).sqrt()
+}
+
 impl Theme {
     pub fn status(&self, s: AgentStatus) -> Color {
         match s {
@@ -125,14 +146,37 @@ impl Theme {
         ramp(&self.series, self.series_from + (1.0 - self.series_from) * t.clamp(0.0, 1.0))
     }
 
-    /// Color of agent `k` of `n` (visible lanes, in order), spread evenly along the ramp.
-    pub fn series_color(&self, k: usize, n: usize) -> Color {
-        self.along(if n <= 1 { 0.5 } else { k as f64 / (n - 1) as f64 })
+    /// Agent color for palette slot `slot`: golden-ratio steps along the used ramp stretch, so a slot keeps its
+    /// color however many agents come and go, and neighbors differ.
+    pub fn agent_color(&self, slot: usize) -> Color {
+        self.along((0.5 + slot as f64 * 0.618_033_988_749_895).fract())
     }
 
     /// HEAT's color for a working share, 0% to 100%, along the same stretch as agent colors.
     pub fn heat_color(&self, share: f64) -> Color {
         self.along(share)
+    }
+
+    /// Status hues too close to the ramp to tell an agent's line from a status, as messages.
+    /// Named ANSI colors render per terminal and aren't checked.
+    pub fn collisions(&self) -> Vec<String> {
+        let checked = [
+            ("status.working", self.working),
+            ("status.blocked", self.blocked),
+            ("status.done", self.done),
+            ("heat_blocked", self.heat_blocked),
+        ];
+        let ramp: Vec<(u8, u8, u8)> = (0..=32).filter_map(|i| rgb(&self.along(f64::from(i) / 32.0))).collect();
+        checked
+            .iter()
+            .filter_map(|&(name, c)| {
+                let c = rgb(&c)?;
+                let d = ramp.iter().map(|&r| delta_e(c, r)).fold(f64::INFINITY, f64::min);
+                (d < 20.0).then(|| {
+                    format!("{name} #{:02x}{:02x}{:02x} is hard to tell apart from the series ramp (ΔE {d:.0})", c.0, c.1, c.2)
+                })
+            })
+            .collect()
     }
 
     /// Applies the keys of a `theme.toml`; returns one message per key it couldn't use.
@@ -218,13 +262,9 @@ impl Theme {
     }
 }
 
-/// `$HERDR_PLUGIN_CONFIG_DIR/theme.toml`, else under `~/.config/herdr/plugins/config/<plugin id>`.
-pub fn theme_path() -> PathBuf {
-    let dir = std::env::var_os("HERDR_PLUGIN_CONFIG_DIR").filter(|d| !d.is_empty()).map(PathBuf::from).unwrap_or_else(|| {
-        let home = std::env::var_os("HOME").unwrap_or_default();
-        PathBuf::from(home).join(".config/herdr/plugins/config").join(crate::herdr::PLUGIN_ID)
-    });
-    dir.join("theme.toml")
+/// `theme.toml` in the plugin config dir.
+pub fn theme_path() -> std::path::PathBuf {
+    crate::config::config_dir().join("theme.toml")
 }
 
 /// The default theme with `path` applied; a missing file is not a problem.
@@ -233,7 +273,8 @@ pub fn load(path: &Path) -> (Theme, Vec<String>) {
     let Ok(text) = std::fs::read_to_string(path) else { return (theme, Vec::new()) };
     match text.parse::<Table>() {
         Ok(table) => {
-            let problems = theme.apply(&table);
+            let mut problems = theme.apply(&table);
+            problems.extend(theme.collisions());
             (theme, problems)
         }
         Err(e) => (theme, vec![format!("{}: {}", path.display(), e.message())]),
@@ -259,14 +300,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_series_is_viridis_from_a_quarter() {
+    fn default_ramp_starts_at_forty_percent() {
         let t = Theme::default();
         assert_eq!(ramp(&t.series, 0.0), Color::Rgb(0x44, 0x01, 0x54));
         assert_eq!(ramp(&t.series, 0.5), Color::Rgb(0x21, 0x91, 0x8c));
-        assert_eq!(t.series_color(1, 2), Color::Rgb(0xfd, 0xe7, 0x25), "last agent at the ramp's end");
-        assert_eq!(t.series_color(0, 2), ramp(&t.series, 0.25));
-        assert_eq!(t.heat_color(0.0), t.series_color(0, 2), "heat starts where agent colors do");
-        assert_eq!(t.heat_color(1.0), t.series_color(1, 2), "and ends where they do");
+        assert_eq!(t.heat_color(0.0), ramp(&t.series, 0.40));
+        assert_eq!(t.heat_color(1.0), ramp(&t.series, 1.0));
+        assert_ne!(t.agent_color(0), t.agent_color(1));
+    }
+
+    #[test]
+    fn collisions_flag_status_hues_on_the_ramp() {
+        let table = |done: &str| -> Table {
+            format!("series = [\"#000000\", \"#ffffff\"]\nseries_from = 0\n[status]\ndone = \"{done}\"").parse().unwrap()
+        };
+        let mut t = Theme::default();
+        assert!(t.apply(&table("#808080")).is_empty());
+        assert!(t.collisions().iter().any(|p| p.starts_with("status.done")), "{:?}", t.collisions());
+        let mut t = Theme::default();
+        t.apply(&table("#ff0000"));
+        assert!(t.collisions().is_empty(), "{:?}", t.collisions());
     }
 
     #[test]
@@ -288,8 +341,9 @@ mod tests {
         problems.sort();
         assert_eq!(t.accent, Color::Magenta);
         assert_eq!(t.working, Color::Rgb(0, 255, 0));
-        assert_eq!(t.series_color(0, 3), Color::Rgb(0, 0, 0));
-        assert_eq!(t.series_color(1, 3), Color::Rgb(128, 128, 128));
+        assert_eq!(t.heat_color(0.0), Color::Rgb(0, 0, 0));
+        assert_eq!(t.agent_color(0), Color::Rgb(128, 128, 128));
+        assert_eq!(t.agent_color(1), Color::Rgb(30, 30, 30));
         assert_eq!(t.fill_alpha, 0.3, "out-of-range value keeps the default");
         assert_eq!(problems.len(), 3, "{problems:?}");
         assert!(problems.iter().any(|p| p.starts_with("bogus")));

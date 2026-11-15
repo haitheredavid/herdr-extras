@@ -6,7 +6,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 
-use super::{App, fmt_dur, put_str, truncate};
+use super::{App, fmt_dur, put_str, status_glyph, truncate};
 use crate::model::{HISTORY_MS, status_time};
 use crate::theme::theme;
 use crate::usage::fmt_tokens;
@@ -78,7 +78,7 @@ pub fn render(buf: &mut Buffer, body: Rect, app: &mut App, lanes: &[usize]) {
     put_str(buf, body, x_state, y0, "state", dim);
 
     let rows = body.height.saturating_sub(1) as usize;
-    let sel = app.selected;
+    let sel = app.sel_row(lanes).unwrap_or(0);
     if sel < app.lane_scroll {
         app.lane_scroll = sel;
     } else if rows > 0 && sel >= app.lane_scroll + rows {
@@ -92,13 +92,14 @@ pub fn render(buf: &mut Buffer, body: Rect, app: &mut App, lanes: &[usize]) {
         if k == sel {
             label = label.add_modifier(Modifier::REVERSED);
         }
-        let (dot, dot_style) = if lane.is_open() { ("●", Style::new().fg(theme().status(lane.status))) } else { ("✕", dim) };
-        put_str(buf, body, body.x, y, dot, dot_style);
+        let (dot, dot_style) =
+            if lane.is_open() { (status_glyph(lane.status), Style::new().fg(theme().status(lane.status))) } else { ('✕', dim) };
+        put_str(buf, body, body.x, y, &dot.to_string(), dot_style);
         put_str(buf, body, x_name, y, &format!("{:<w$}", truncate(lane.label(), NAME_W as usize), w = NAME_W as usize), label);
         put_str(buf, body, x_ws, y, &truncate(app.state.workspace_label(li), WS_W as usize), dim);
 
         if spark_w > 0 && spark_max > 0 {
-            let color = theme().series_color(k, lanes.len());
+            let color = theme().agent_color(lane.slot.unwrap_or(0));
             let spark: String = (0..spark_w)
                 .map(|i| {
                     let at = (from + (i64::from(i) + 1) * cell_ms - 1).min(now);

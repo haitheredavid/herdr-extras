@@ -1,59 +1,15 @@
-//! Wire types and the track state: one lane per pane lifetime, one step per state change, folded
-//! from the history log, snapshots and live events.
+//! The trail state: one lane per pane lifetime, one step per state change, folded from the history
+//! log, snapshots and live events through one `HostEvent` fold.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::herdr::Envelope;
-use crate::history::LogEvent;
+use crate::herdr::Snapshot;
 
 /// Log window loaded at start; closed lanes older than this are pruned.
 pub const HISTORY_MS: i64 = 2 * 3600 * 1000;
-
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct Snapshot {
-    #[serde(default)]
-    pub panes: Vec<PaneInfo>,
-    #[serde(default)]
-    pub workspaces: Vec<WorkspaceInfo>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct PaneInfo {
-    pub pane_id: String,
-    pub workspace_id: String,
-    #[serde(default)]
-    pub agent: Option<String>,
-    #[serde(default)]
-    pub title: Option<String>,
-    /// Latest OSC terminal title; agents like omp put their current task here.
-    #[serde(default, rename = "terminal_title_stripped")]
-    pub terminal_title: Option<String>,
-    #[serde(default)]
-    pub cwd: Option<String>,
-    #[serde(default)]
-    pub agent_status: AgentStatus,
-    #[serde(default)]
-    pub agent_session: Option<AgentSession>,
-}
-
-/// Agent session identity herdr reports; omp reports `kind = "path"` with its session JSONL.
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct AgentSession {
-    #[serde(default)]
-    pub kind: String,
-    #[serde(default)]
-    pub value: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct WorkspaceInfo {
-    pub workspace_id: String,
-    #[serde(default)]
-    pub label: Option<String>,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -93,6 +49,65 @@ pub fn task_text(title: &str) -> Option<&str> {
     (!rest.is_empty() && rest.chars().count() > 1).then_some(rest)
 }
 
+/// One pane fact from any source (live event, snapshot, history log), folded by `State::apply`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PaneMeta {
+    pub pane_id: String,
+    pub workspace_id: String,
+    pub workspace_label: Option<String>,
+    pub tab_id: Option<String>,
+    pub tab_label: Option<String>,
+    pub terminal_id: Option<String>,
+    pub agent: Option<String>,
+    pub title: Option<String>,
+    pub terminal_title: Option<String>,
+    pub cwd: Option<String>,
+    pub status: Option<AgentStatus>,
+    /// Agent session file herdr reports for the pane (`kind == "path"` only).
+    pub session: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum HostEvent {
+    Created(PaneMeta),
+    /// A full pane record (snapshot or `pane.updated`): its title replaces the lane's, even when empty.
+    Updated(PaneMeta),
+    Detected {
+        meta: PaneMeta,
+        released: bool,
+    },
+    /// `meta.status` is always `Some`.
+    Status(PaneMeta),
+    Moved {
+        previous_pane_id: String,
+        pane: PaneMeta,
+    },
+    Closed {
+        pane_id: String,
+    },
+    Exited {
+        pane_id: String,
+    },
+}
+
+impl HostEvent {
+    fn meta(&self) -> Option<&PaneMeta> {
+        match self {
+            HostEvent::Created(m) | HostEvent::Updated(m) | HostEvent::Status(m) => Some(m),
+            HostEvent::Detected { meta, .. } => Some(meta),
+            HostEvent::Moved { pane, .. } => Some(pane),
+            HostEvent::Closed { .. } | HostEvent::Exited { .. } => None,
+        }
+    }
+
+    fn pane_id(&self) -> &str {
+        match self {
+            HostEvent::Closed { pane_id } | HostEvent::Exited { pane_id } => pane_id,
+            _ => self.meta().map_or("", |m| m.pane_id.as_str()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mark {
     /// First met already running (snapshot, or a status event with no prior lane).
@@ -114,10 +129,19 @@ pub struct Step {
 /// One pane lifetime. A pane id reused after close starts a new lane.
 #[derive(Debug, Clone)]
 pub struct Lane {
+    /// Unique for this run; selection and expansion follow it.
+    pub id: u64,
+    /// Agent palette slot, assigned once in first-seen order.
+    pub slot: Option<usize>,
     pub pane_id: String,
     pub workspace_id: String,
     /// Latest non-empty label from the log.
     pub workspace_label: Option<String>,
+    pub tab_id: Option<String>,
+    /// Latest non-empty tab label from the log.
+    pub tab_label: Option<String>,
+    /// Stable across pane moves; a moved pane rejoins its lane by it.
+    pub terminal_id: Option<String>,
     /// Latest non-empty agent name; never cleared (release is ignored).
     pub agent: Option<String>,
     pub title: Option<String>,
@@ -199,46 +223,15 @@ pub fn status_time(lane: &Lane, from_ms: i64, to_ms: i64) -> StatusTime {
 pub struct State {
     pub lanes: Vec<Lane>,
     pub workspaces: BTreeMap<String, String>,
+    /// Tab id → label, from the last snapshot.
+    pub tabs: BTreeMap<String, String>,
+    pub focused_workspace: Option<String>,
+    pub focused_tab: Option<String>,
+    /// herdr's protocol version, from the last snapshot.
+    pub protocol: Option<u32>,
     pub self_pane: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct PanePayload {
-    pane: PaneInfo,
-}
-
-#[derive(Deserialize)]
-struct PaneRef {
-    pane_id: String,
-}
-
-#[derive(Deserialize)]
-struct DetectedPayload {
-    pane_id: String,
-    #[serde(default)]
-    workspace_id: String,
-    #[serde(default)]
-    agent: Option<String>,
-    #[serde(default)]
-    released: bool,
-}
-
-#[derive(Deserialize)]
-struct StatusPayload {
-    pane_id: String,
-    #[serde(default)]
-    workspace_id: String,
-    agent_status: AgentStatus,
-    #[serde(default)]
-    agent: Option<String>,
-    #[serde(default)]
-    title: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct MovedPayload {
-    previous_pane_id: String,
-    pane: PaneInfo,
+    next_id: u64,
+    next_slot: usize,
 }
 
 fn nonempty(s: &Option<String>) -> Option<String> {
@@ -259,11 +252,21 @@ impl State {
         self.lanes.iter().rposition(|l| l.pane_id == pane_id && l.closed_ms.is_none())
     }
 
+    pub fn lane_by_id(&self, id: u64) -> Option<usize> {
+        self.lanes.iter().position(|l| l.id == id)
+    }
+
     pub fn open(&mut self, pane_id: &str, workspace_id: &str, at_ms: i64, mark: Mark, status: AgentStatus, live: bool) -> usize {
+        self.next_id += 1;
         self.lanes.push(Lane {
+            id: self.next_id,
+            slot: None,
             pane_id: pane_id.to_string(),
             workspace_id: workspace_id.to_string(),
             workspace_label: None,
+            tab_id: None,
+            tab_label: None,
+            terminal_id: None,
             agent: None,
             title: None,
             terminal_title: None,
@@ -302,77 +305,113 @@ impl State {
         lane.steps.push(Step { at_ms, mark, status: lane.status });
     }
 
-    pub fn apply_log(&mut self, e: &LogEvent) {
-        if self.is_self(&e.pane_id) {
-            return;
+    /// A pane that moved comes back under a new pane id: when no open lane has `m.pane_id` but one
+    /// has its terminal id, that lane takes the new pane id. True when it did.
+    fn rejoin(&mut self, m: &PaneMeta) -> bool {
+        if self.open_lane(&m.pane_id).is_some() {
+            return false;
         }
-        if let Some(i) = self.open_lane(&e.pane_id) {
-            let lane = &mut self.lanes[i];
-            if let Some(l) = nonempty(&e.workspace_label) {
-                lane.workspace_label = Some(l);
-            }
-            if let Some(a) = nonempty(&e.agent) {
-                lane.agent = Some(a);
-            }
-            if let Some(c) = nonempty(&e.cwd) {
-                lane.cwd = Some(c);
+        let Some(t) = m.terminal_id.as_deref() else { return false };
+        let Some(i) = self.lanes.iter().position(|l| l.is_open() && l.terminal_id.as_deref() == Some(t)) else { return false };
+        self.lanes[i].pane_id = m.pane_id.clone();
+        true
+    }
+
+    /// Takes `m`'s fields onto lane `i`. A full record (`full`) replaces agent, titles and cwd
+    /// whenever it carries them, so a title herdr cleared doesn't linger; partial facts only
+    /// fill in non-empty values.
+    fn merge(&mut self, i: usize, m: &PaneMeta, full: bool, live: bool) {
+        let lane = &mut self.lanes[i];
+        if live {
+            lane.live = true;
+        }
+        if !m.workspace_id.is_empty() {
+            lane.workspace_id = m.workspace_id.clone();
+        }
+        for (slot, value) in [
+            (&mut lane.workspace_label, &m.workspace_label),
+            (&mut lane.tab_id, &m.tab_id),
+            (&mut lane.tab_label, &m.tab_label),
+            (&mut lane.terminal_id, &m.terminal_id),
+        ] {
+            if let Some(v) = nonempty(value) {
+                *slot = Some(v);
             }
         }
-        let status = e.status.unwrap_or_default();
-        match e.event.as_str() {
-            "pane.created" => {
-                self.close(&e.pane_id, Mark::Closed, e.ts_ms);
-                let i = self.open(&e.pane_id, &e.workspace_id, e.ts_ms, Mark::Created, status, false);
-                let lane = &mut self.lanes[i];
-                lane.workspace_label = nonempty(&e.workspace_label);
-                lane.agent = nonempty(&e.agent);
-                lane.cwd = nonempty(&e.cwd);
+        for (slot, value) in [(&mut lane.agent, &m.agent), (&mut lane.terminal_title, &m.terminal_title), (&mut lane.cwd, &m.cwd)]
+        {
+            if full && value.is_some() {
+                slot.clone_from(value);
+            } else if let Some(v) = nonempty(value) {
+                *slot = Some(v);
             }
-            "pane.agent_detected" | "pane.agent_status_changed" => {
-                let fresh = self.open_lane(&e.pane_id).is_none();
-                let i = self.open_or_seen(&e.pane_id, &e.workspace_id, e.ts_ms, status, false);
-                if fresh {
-                    let lane = &mut self.lanes[i];
-                    lane.workspace_label = nonempty(&e.workspace_label);
-                    lane.agent = nonempty(&e.agent);
-                    lane.cwd = nonempty(&e.cwd);
-                }
-                if let Some(s) = e.status {
-                    self.set_status(i, s, e.ts_ms);
-                }
-            }
-            "pane.closed" => self.close(&e.pane_id, Mark::Closed, e.ts_ms),
-            "pane.exited" => self.close(&e.pane_id, Mark::Exited, e.ts_ms),
-            _ => {}
+        }
+        if full {
+            lane.title.clone_from(&m.title);
+        } else if let Some(t) = nonempty(&m.title) {
+            lane.title = Some(t);
+        }
+        if let Some(s) = &m.session
+            && !lane.sessions.contains(s)
+        {
+            lane.sessions.push(s.clone());
         }
     }
 
-    /// Opens a `Seen` lane if needed, then takes the pane's metadata and status as current.
-    fn update_pane(&mut self, p: &PaneInfo, now_ms: i64) {
-        if self.is_self(&p.pane_id) {
+    fn update(&mut self, m: &PaneMeta, at_ms: i64, live: bool) {
+        let i = self.open_or_seen(&m.pane_id, &m.workspace_id, at_ms, m.status.unwrap_or_default(), live);
+        self.merge(i, m, true, live);
+        if let Some(s) = m.status {
+            self.set_status(i, s, at_ms);
+        }
+    }
+
+    /// Folds one pane fact at `at_ms`; `live` marks facts from this run (snapshot or subscription).
+    pub fn apply(&mut self, e: &HostEvent, at_ms: i64, live: bool) {
+        if let HostEvent::Moved { previous_pane_id, pane } = e
+            && self.is_self(previous_pane_id)
+        {
+            // The pinned band followed focus to another workspace: keep skipping it.
+            self.self_pane = Some(pane.pane_id.clone());
             return;
         }
-        let i = self.open_or_seen(&p.pane_id, &p.workspace_id, now_ms, p.agent_status, true);
-        let lane = &mut self.lanes[i];
-        lane.live = true;
-        lane.workspace_id = p.workspace_id.clone();
-        lane.title = p.title.clone();
-        if p.terminal_title.is_some() {
-            lane.terminal_title = p.terminal_title.clone();
+        if self.is_self(e.pane_id()) {
+            return;
         }
-        if p.cwd.is_some() {
-            lane.cwd = p.cwd.clone();
-        }
-        if p.agent.is_some() {
-            lane.agent = p.agent.clone();
-        }
-        if let Some(s) = p.agent_session.as_ref().filter(|s| s.kind == "path" && !s.value.is_empty()) {
-            let path = PathBuf::from(&s.value);
-            if !lane.sessions.contains(&path) {
-                lane.sessions.push(path);
+        let rejoined = e.meta().is_some_and(|m| self.rejoin(m));
+        match e {
+            // A move herdr reports as a create must not split the history.
+            HostEvent::Created(m) if rejoined => self.update(m, at_ms, live),
+            HostEvent::Created(m) => {
+                self.close(&m.pane_id, Mark::Closed, at_ms);
+                let i = self.open(&m.pane_id, &m.workspace_id, at_ms, Mark::Created, m.status.unwrap_or_default(), live);
+                self.merge(i, m, false, live);
             }
+            HostEvent::Updated(m) => self.update(m, at_ms, live),
+            HostEvent::Detected { meta, released } => {
+                let i = self.open_or_seen(&meta.pane_id, &meta.workspace_id, at_ms, meta.status.unwrap_or_default(), live);
+                let agent = if *released { None } else { meta.agent.clone() };
+                self.merge(i, &PaneMeta { agent, ..meta.clone() }, false, live);
+                if let Some(s) = meta.status {
+                    self.set_status(i, s, at_ms);
+                }
+            }
+            HostEvent::Status(m) => {
+                let status = m.status.unwrap_or_default();
+                let i = self.open_or_seen(&m.pane_id, &m.workspace_id, at_ms, status, live);
+                self.merge(i, m, false, live);
+                self.set_status(i, status, at_ms);
+            }
+            HostEvent::Moved { previous_pane_id, pane } => {
+                if let Some(i) = self.open_lane(previous_pane_id) {
+                    self.lanes[i].pane_id = pane.pane_id.clone();
+                }
+                self.update(pane, at_ms, live);
+            }
+            HostEvent::Closed { pane_id } => self.close(pane_id, Mark::Closed, at_ms),
+            HostEvent::Exited { pane_id } => self.close(pane_id, Mark::Exited, at_ms),
         }
-        self.set_status(i, p.agent_status, now_ms);
+        self.assign_slots();
     }
 
     pub fn apply_snapshot(&mut self, snap: &Snapshot, now_ms: i64) {
@@ -381,8 +420,12 @@ impl State {
             .iter()
             .map(|w| (w.workspace_id.clone(), w.label.clone().unwrap_or_else(|| w.workspace_id.clone())))
             .collect();
+        self.tabs = snap.tabs.iter().map(|t| (t.tab_id.clone(), t.label.clone().unwrap_or_else(|| t.tab_id.clone()))).collect();
+        self.focused_workspace.clone_from(&snap.focused_workspace_id);
+        self.focused_tab.clone_from(&snap.focused_tab_id);
+        self.protocol = snap.protocol;
         for p in &snap.panes {
-            self.update_pane(p, now_ms);
+            self.apply(&HostEvent::Updated(p.into()), now_ms, true);
         }
         let present: BTreeSet<&str> = snap.panes.iter().map(|p| p.pane_id.as_str()).collect();
         let gone: Vec<(String, i64)> = self
@@ -396,75 +439,17 @@ impl State {
             self.close(&id, Mark::Closed, at);
         }
         self.lanes.retain(|l| l.closed_ms.is_none_or(|c| c >= now_ms - HISTORY_MS));
+        self.assign_slots();
     }
 
-    pub fn apply_envelope(&mut self, env: &Envelope, now_ms: i64) {
-        let data = env.data.clone();
-        match env.event.replace('.', "_").as_str() {
-            "pane_created" => {
-                let Ok(p) = serde_json::from_value::<PanePayload>(data) else { return };
-                if self.is_self(&p.pane.pane_id) {
-                    return;
-                }
-                self.close(&p.pane.pane_id, Mark::Closed, now_ms);
-                self.open(&p.pane.pane_id, &p.pane.workspace_id, now_ms, Mark::Created, p.pane.agent_status, true);
-                self.update_pane(&p.pane, now_ms);
+    /// Gives each visible lane without a palette slot the next one, in first-seen (vector) order,
+    /// so an agent keeps its color however many others come and go.
+    pub fn assign_slots(&mut self) {
+        for lane in &mut self.lanes {
+            if lane.visible() && lane.slot.is_none() {
+                lane.slot = Some(self.next_slot);
+                self.next_slot += 1;
             }
-            "pane_updated" => {
-                let Ok(p) = serde_json::from_value::<PanePayload>(data) else { return };
-                self.update_pane(&p.pane, now_ms);
-            }
-            "pane_closed" => {
-                let Ok(p) = serde_json::from_value::<PaneRef>(data) else { return };
-                self.close(&p.pane_id, Mark::Closed, now_ms);
-            }
-            "pane_exited" => {
-                let Ok(p) = serde_json::from_value::<PaneRef>(data) else { return };
-                self.close(&p.pane_id, Mark::Exited, now_ms);
-            }
-            "pane_agent_detected" => {
-                let Ok(p) = serde_json::from_value::<DetectedPayload>(data) else { return };
-                if self.is_self(&p.pane_id) {
-                    return;
-                }
-                let i = self.open_or_seen(&p.pane_id, &p.workspace_id, now_ms, AgentStatus::Unknown, true);
-                let lane = &mut self.lanes[i];
-                lane.live = true;
-                if !p.released
-                    && let Some(a) = nonempty(&p.agent)
-                {
-                    lane.agent = Some(a);
-                }
-            }
-            "pane_agent_status_changed" => {
-                let Ok(p) = serde_json::from_value::<StatusPayload>(data) else { return };
-                if self.is_self(&p.pane_id) {
-                    return;
-                }
-                let i = self.open_or_seen(&p.pane_id, &p.workspace_id, now_ms, p.agent_status, true);
-                let lane = &mut self.lanes[i];
-                lane.live = true;
-                if p.agent.is_some() {
-                    lane.agent = p.agent;
-                }
-                if p.title.is_some() {
-                    lane.title = p.title;
-                }
-                self.set_status(i, p.agent_status, now_ms);
-            }
-            "pane_moved" => {
-                let Ok(p) = serde_json::from_value::<MovedPayload>(data) else { return };
-                if self.is_self(&p.previous_pane_id) {
-                    // The pinned band followed focus to another workspace: keep skipping it.
-                    self.self_pane = Some(p.pane.pane_id);
-                    return;
-                }
-                if let Some(i) = self.open_lane(&p.previous_pane_id) {
-                    self.lanes[i].pane_id = p.pane.pane_id.clone();
-                }
-                self.update_pane(&p.pane, now_ms);
-            }
-            _ => {}
         }
     }
 
@@ -479,6 +464,12 @@ impl State {
     /// Workspace label for display: snapshot label, else the logged one, else the id.
     pub fn workspace_label(&self, idx: usize) -> &str {
         self.workspace_of(&self.lanes[idx])
+    }
+
+    /// Tab label for display: snapshot label, else the logged one.
+    pub fn tab_label(&self, idx: usize) -> Option<&str> {
+        let lane = &self.lanes[idx];
+        lane.tab_id.as_ref().and_then(|t| self.tabs.get(t)).map(String::as_str).or(lane.tab_label.as_deref())
     }
 
     /// Indices of agent lanes, by workspace label, then open time, then pane id.
@@ -500,6 +491,8 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::herdr::{Envelope, host_event};
+    use crate::history::LogEvent;
     use serde_json::json;
 
     fn log(ts_ms: i64, event: &str, pane_id: &str, status: Option<AgentStatus>) -> LogEvent {
@@ -515,6 +508,17 @@ mod tests {
             agent: Some("omp".into()),
             status,
         }
+    }
+
+    fn fold(s: &mut State, e: &LogEvent) {
+        if let Some(h) = e.host_event() {
+            s.apply(&h, e.ts_ms, false);
+        }
+    }
+
+    fn envelope(s: &mut State, event: &str, data: serde_json::Value, at_ms: i64) {
+        let h = host_event(&Envelope { event: event.into(), data }).expect("tracked event");
+        s.apply(&h, at_ms, true);
     }
 
     fn marks(lane: &Lane) -> Vec<Mark> {
@@ -533,7 +537,7 @@ mod tests {
             log(30, "pane.closed", "p1", None),
             log(40, "pane.created", "p1", None),
         ] {
-            s.apply_log(&e);
+            fold(&mut s, &e);
         }
         assert_eq!(s.lanes.len(), 2);
         assert_eq!(marks(&s.lanes[0]), [Mark::Created, Mark::Status(Working), Mark::Status(Blocked), Mark::Closed]);
@@ -548,14 +552,16 @@ mod tests {
     fn snapshot_merges_with_log_lanes() {
         use AgentStatus::*;
         let mut s = State::default();
-        s.apply_log(&log(0, "pane.created", "p1", Some(Idle)));
-        s.apply_log(&log(50, "pane.agent_status_changed", "p1", Some(Working)));
-        s.apply_log(&log(5, "pane.created", "p3", Some(Idle)));
+        fold(&mut s, &log(0, "pane.created", "p1", Some(Idle)));
+        fold(&mut s, &log(50, "pane.agent_status_changed", "p1", Some(Working)));
+        fold(&mut s, &log(5, "pane.created", "p3", Some(Idle)));
         let snap: Snapshot = serde_json::from_value(json!({
             "workspaces": [{"workspace_id": "w1", "label": "repo"}],
+            "tabs": [{"tab_id": "w1:t1", "workspace_id": "w1", "label": "main"}],
+            "protocol": 22,
             "panes": [
                 {"pane_id": "p2", "workspace_id": "w1", "agent": "omp", "agent_status": "idle"},
-                {"pane_id": "p3", "workspace_id": "w1", "agent": "omp", "agent_status": "working",
+                {"pane_id": "p3", "workspace_id": "w1", "tab_id": "w1:t1", "agent": "omp", "agent_status": "working",
                  "terminal_title_stripped": "π ⠇ fix login",
                  "agent_session": {"kind": "path", "value": "/s/a.jsonl"}},
             ],
@@ -571,11 +577,14 @@ mod tests {
         assert_eq!(p2.steps, [Step { at_ms: 1000, mark: Mark::Seen, status: Idle }]);
         assert!(p2.live);
 
-        let p3 = s.lanes.iter().find(|l| l.pane_id == "p3").unwrap();
+        let i3 = s.lanes.iter().position(|l| l.pane_id == "p3").unwrap();
+        let p3 = &s.lanes[i3];
         assert!(p3.live && p3.is_open());
         assert_eq!(p3.steps.last().unwrap(), &Step { at_ms: 1000, mark: Mark::Status(Working), status: Working });
         assert_eq!(p3.label(), "fix login");
         assert_eq!(p3.sessions, [PathBuf::from("/s/a.jsonl")]);
+        assert_eq!(s.tab_label(i3), Some("main"));
+        assert_eq!(s.protocol, Some(22));
         assert_eq!(s.open_live_ids().into_iter().collect::<Vec<_>>(), ["p2", "p3"]);
     }
 
@@ -595,9 +604,7 @@ mod tests {
         for kind in ["pane.agent_status_changed", "pane_agent_status_changed"] {
             let mut s = State::default();
             s.open("p1", "w1", 0, Mark::Seen, AgentStatus::Idle, true);
-            let env =
-                Envelope { event: kind.into(), data: json!({"pane_id": "p1", "workspace_id": "w1", "agent_status": "working"}) };
-            s.apply_envelope(&env, 10);
+            envelope(&mut s, kind, json!({"pane_id": "p1", "workspace_id": "w1", "agent_status": "working"}), 10);
             assert_eq!(s.lanes[0].status, AgentStatus::Working, "{kind}");
             assert_eq!(s.lanes[0].steps.last().unwrap().mark, Mark::Status(AgentStatus::Working));
         }
@@ -607,12 +614,9 @@ mod tests {
     fn moved_renames_open_lane() {
         let mut s = State::default();
         s.open("w1:p1", "w1", 0, Mark::Seen, AgentStatus::Idle, true);
-        let env = Envelope {
-            event: "pane_moved".into(),
-            data: json!({"previous_pane_id": "w1:p1",
-                         "pane": {"pane_id": "w2:p4", "workspace_id": "w2", "agent": "omp", "agent_status": "idle"}}),
-        };
-        s.apply_envelope(&env, 5);
+        let data = json!({"previous_pane_id": "w1:p1",
+                          "pane": {"pane_id": "w2:p4", "workspace_id": "w2", "agent": "omp", "agent_status": "idle"}});
+        envelope(&mut s, "pane_moved", data, 5);
         assert_eq!(s.lanes.len(), 1);
         assert_eq!((s.lanes[0].pane_id.as_str(), s.lanes[0].workspace_id.as_str()), ("w2:p4", "w2"));
         assert_eq!(s.lanes[0].agent.as_deref(), Some("omp"));
@@ -621,17 +625,45 @@ mod tests {
     #[test]
     fn moved_self_stays_self() {
         let mut s = State::new(Some("w1:p2".into()));
-        let env = Envelope {
-            event: "pane_moved".into(),
-            data: json!({"previous_pane_id": "w1:p2", "pane": {"pane_id": "w3:p5", "workspace_id": "w3"}}),
-        };
-        s.apply_envelope(&env, 5);
+        let data = json!({"previous_pane_id": "w1:p2", "pane": {"pane_id": "w3:p5", "workspace_id": "w3"}});
+        envelope(&mut s, "pane_moved", data, 5);
         assert!(s.lanes.is_empty());
-        s.apply_envelope(
-            &Envelope { event: "pane_updated".into(), data: json!({"pane": {"pane_id": "w3:p5", "workspace_id": "w3"}}) },
-            6,
-        );
+        envelope(&mut s, "pane_updated", json!({"pane": {"pane_id": "w3:p5", "workspace_id": "w3"}}), 6);
         assert!(s.lanes.is_empty(), "the band's new pane id is still itself");
+    }
+
+    #[test]
+    fn moved_pane_rejoins_by_terminal_id() {
+        let mut s = State::default();
+        let first = PaneMeta {
+            pane_id: "w1:p1".into(),
+            workspace_id: "w1".into(),
+            terminal_id: Some("t1".into()),
+            agent: Some("omp".into()),
+            ..PaneMeta::default()
+        };
+        s.apply(&HostEvent::Updated(PaneMeta { status: Some(AgentStatus::Idle), ..first.clone() }), 0, true);
+        let moved = PaneMeta { pane_id: "w2:p4".into(), workspace_id: "w2".into(), status: Some(AgentStatus::Working), ..first };
+        s.apply(&HostEvent::Status(moved), 10, true);
+        assert_eq!(s.lanes.len(), 1);
+        assert_eq!((s.lanes[0].pane_id.as_str(), s.lanes[0].workspace_id.as_str()), ("w2:p4", "w2"));
+        assert_eq!(s.lanes[0].status, AgentStatus::Working);
+    }
+
+    #[test]
+    fn agent_slots_are_assigned_once_in_first_seen_order() {
+        let mut s = State::default();
+        for (t, p) in [(0, "p1"), (1, "p2"), (2, "p3")] {
+            fold(&mut s, &log(t, "pane.created", p, Some(AgentStatus::Idle)));
+        }
+        fold(&mut s, &log(10, "pane.closed", "p1", None));
+        let pane = |id: &str| json!({"pane_id": id, "workspace_id": "w1", "agent": "omp", "agent_status": "idle"});
+        let snap: Snapshot = serde_json::from_value(json!({"panes": [pane("p2"), pane("p3")]})).unwrap();
+        s.apply_snapshot(&snap, 10 + HISTORY_MS + 1);
+        assert_eq!(s.lanes.len(), 2, "p1 pruned");
+        fold(&mut s, &log(20 + HISTORY_MS, "pane.created", "p4", Some(AgentStatus::Idle)));
+        let slots: Vec<_> = s.lanes.iter().map(|l| (l.pane_id.as_str(), l.slot)).collect();
+        assert_eq!(slots, [("p2", Some(1)), ("p3", Some(2)), ("p4", Some(3))]);
     }
 
     #[test]

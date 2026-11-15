@@ -14,6 +14,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
+use crate::config::config_problems;
 use crate::model::{AgentStatus, Lane, Mark, State};
 use crate::theme::{theme, theme_problems};
 use crate::usage::{Tracker, fmt_tokens};
@@ -55,6 +56,11 @@ impl ViewKind {
             ViewKind::Heat => "HEAT",
             ViewKind::Dash => "DASH",
         }
+    }
+
+    /// The view a `--view` / `[start] view` name picks.
+    pub fn from_name(name: &str) -> Option<ViewKind> {
+        ViewKind::ALL.iter().copied().find(|v| v.name().eq_ignore_ascii_case(name))
     }
 
     fn next(self) -> ViewKind {
@@ -108,8 +114,10 @@ pub struct App {
     pub view_end_ms: i64,
     /// Sequence view: steps hidden from the end of every lane.
     pub seq_back: usize,
-    /// Index into `state.visible_lanes()`.
-    pub selected: usize,
+    /// Id of the selected lane; it stays selected however the rows reorder.
+    pub selected: Option<u64>,
+    /// Row of the last selection, used while the selected lane isn't shown.
+    sel_hint: usize,
     lane_scroll: usize,
     /// Time-axis cells in the last render; scroll steps are a quarter of it.
     time_cells: usize,
@@ -141,7 +149,8 @@ impl App {
             follow: true,
             view_end_ms: now_ms,
             seq_back: 0,
-            selected: 0,
+            selected: None,
+            sel_hint: 0,
             lane_scroll: 0,
             time_cells: 1,
             now_ms,
@@ -168,9 +177,23 @@ impl App {
         BUCKETS_S[self.bucket_idx] * 1000
     }
 
+    /// Highlighted row: the selected lane's, else the last selected row (clamped) while it's hidden.
+    pub(crate) fn sel_row(&self, rows: &[usize]) -> Option<usize> {
+        self.selected
+            .and_then(|id| self.state.lane_by_id(id))
+            .and_then(|li| rows.iter().position(|&i| i == li))
+            .or_else(|| (!rows.is_empty()).then(|| self.sel_hint.min(rows.len() - 1)))
+    }
+
+    fn select_row(&mut self, rows: &[usize], r: usize) {
+        let Some(&i) = rows.get(r) else { return };
+        self.selected = Some(self.state.lanes[i].id);
+        self.sel_hint = r;
+    }
+
     fn selected_lane(&self) -> Option<usize> {
         let lanes = self.state.visible_lanes();
-        lanes.get(self.selected.min(lanes.len().saturating_sub(1))).copied()
+        self.sel_row(&lanes).map(|r| lanes[r])
     }
 
     pub fn on_key(&mut self, key: KeyEvent) {
@@ -192,13 +215,12 @@ impl App {
                 matches!(c, KeyCode::Char('j') | KeyCode::Down),
             )
         };
-        if next {
-            let n = self.state.visible_lanes().len();
-            self.selected = (self.selected + 1).min(n.saturating_sub(1));
-            return;
-        }
-        if prev {
-            self.selected = self.selected.saturating_sub(1);
+        if next || prev {
+            let rows = self.state.visible_lanes();
+            if let Some(r) = self.sel_row(&rows) {
+                let r = if next { (r + 1).min(rows.len() - 1) } else { r.saturating_sub(1) };
+                self.select_row(&rows, r);
+            }
             return;
         }
         let step = (self.time_cells as i64 / 4).max(1) * self.bucket_ms();
@@ -239,7 +261,10 @@ impl App {
             KeyCode::Tab => self.view = self.view.next(),
             KeyCode::Char(c @ '1'..='5') => self.view = ViewKind::ALL[c as usize - '1' as usize],
             KeyCode::Char('o') => {
-                self.orient = if horizontal { Orient::Vertical } else { Orient::Horizontal };
+                self.orient = match self.orient {
+                    Orient::Horizontal => Orient::Vertical,
+                    Orient::Vertical => Orient::Horizontal,
+                };
                 self.lane_scroll = 0;
             }
             KeyCode::Char('q') => self.quit = true,
@@ -269,12 +294,25 @@ impl App {
     }
 }
 
+/// Shape of a status, so state reads without color.
+pub fn status_glyph(s: AgentStatus) -> char {
+    match s {
+        AgentStatus::Working => '●',
+        AgentStatus::Blocked => '▲',
+        AgentStatus::Done => '✓',
+        AgentStatus::Idle => '○',
+        AgentStatus::Unknown => '·',
+    }
+}
+
 pub fn line_glyph(s: AgentStatus, orient: Orient) -> char {
     match (s, orient) {
-        (AgentStatus::Working | AgentStatus::Blocked | AgentStatus::Done, Orient::Horizontal) => '━',
+        (AgentStatus::Working | AgentStatus::Done, Orient::Horizontal) => '━',
+        (AgentStatus::Blocked, Orient::Horizontal) => '╍',
         (AgentStatus::Idle, Orient::Horizontal) => '─',
         (AgentStatus::Unknown, Orient::Horizontal) => '┈',
-        (AgentStatus::Working | AgentStatus::Blocked | AgentStatus::Done, Orient::Vertical) => '┃',
+        (AgentStatus::Working | AgentStatus::Done, Orient::Vertical) => '┃',
+        (AgentStatus::Blocked, Orient::Vertical) => '╏',
         (AgentStatus::Idle, Orient::Vertical) => '│',
         (AgentStatus::Unknown, Orient::Vertical) => '┆',
     }
@@ -284,7 +322,7 @@ pub fn node_glyph(mark: Mark) -> (char, Color) {
     match mark {
         Mark::Created => ('◆', theme().created),
         Mark::Seen => ('◇', theme().seen),
-        Mark::Status(s) => ('●', theme().status(s)),
+        Mark::Status(s) => (status_glyph(s), theme().status(s)),
         Mark::Closed | Mark::Exited => ('✕', theme().closed),
     }
 }
@@ -338,7 +376,7 @@ impl Scale {
 }
 
 fn is_line(ch: char) -> bool {
-    matches!(ch, '━' | '─' | '┈' | '┃' | '│' | '┆')
+    matches!(ch, '━' | '─' | '┈' | '┃' | '│' | '┆' | '╍' | '╏')
 }
 
 /// Corner at the old level, run between, corner at the new level, for a line stepping across the
@@ -515,7 +553,7 @@ impl Grid {
     /// the level changes between cells, the line bends across the band in the new cell.
     fn draw_lanes(&self, buf: &mut Buffer, app: &mut App, lanes: &[usize], pts: impl Fn(&Lane, &Tracker, usize) -> Vec<Pt>) {
         let slots = self.slots();
-        let sel = app.selected;
+        let Some(sel) = app.sel_row(lanes) else { return };
         if sel < app.lane_scroll {
             app.lane_scroll = sel;
         } else if slots > 0 && sel >= app.lane_scroll + slots {
@@ -537,8 +575,11 @@ impl Grid {
                             buf[(cx, y)].set_style(Style::new().add_modifier(Modifier::REVERSED));
                         }
                     }
-                    let (glyph, gs) =
-                        if lane.is_open() { ('●', Style::new().fg(theme().status(lane.status))) } else { ('✕', dim) };
+                    let (glyph, gs) = if lane.is_open() {
+                        (status_glyph(lane.status), Style::new().fg(theme().status(lane.status)))
+                    } else {
+                        ('✕', dim)
+                    };
                     put_str(buf, self.body, x, y, &glyph.to_string(), gs.patch(label_style));
                     put_str(buf, self.body, x + 2, y, &truncate(lane.label(), 13), label_style);
                     let ws = truncate(app.state.workspace_label(li), 6);
@@ -554,23 +595,19 @@ impl Grid {
                     put_str(buf, self.body, x, self.body.y, &format!("{:<5}", truncate(lane.label(), 5)), label_style);
                 }
             }
-            // Lines and bends take the agent's color; nodes and the head keep their status colors.
-            let agent = theme().series_color(k, lanes.len());
+            // Lines, bends, nodes and the head all take status colors.
             let mut prev: Option<u8> = None;
             for (i, pt) in pts(lane, &app.usage, n).into_iter().enumerate().take(n) {
                 let Some((mut ch, mut color)) = pt.cell else {
                     prev = None;
                     continue;
                 };
-                if is_line(ch) {
-                    color = agent;
-                }
                 if let Some(p) = prev
                     && p != pt.level
                 {
                     let s = pt.status.unwrap_or_default();
                     let heavy = matches!(s, AgentStatus::Working | AgentStatus::Blocked | AgentStatus::Done);
-                    let c = agent;
+                    let c = theme().status(s);
                     let (from, mid, to) = bend(self.orient, pt.level > p, heavy);
                     self.put(buf, self.cell_pos(slot, i, p), from, c);
                     for l in p.min(pt.level) + 1..p.max(pt.level) {
@@ -596,7 +633,6 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
         Layout::vertical([Constraint::Length(1), Constraint::Min(1), Constraint::Length(1), Constraint::Length(1)]).areas(area);
     let dim = Style::new().fg(theme().dim);
     let lanes = app.state.visible_lanes();
-    app.selected = app.selected.min(lanes.len().saturating_sub(1));
     if app.view.timed() && app.follow {
         app.view_end_ms = app.now_ms;
     }
@@ -634,16 +670,18 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
     if let Some(err) = &app.error {
         spans.push(Span::styled(format!(" · herdr socket unavailable: {err} — retrying"), Style::new().fg(theme().error)));
     }
-    if let [first, rest @ ..] = theme_problems() {
-        let more = if rest.is_empty() { String::new() } else { format!(" (+{} more)", rest.len()) };
-        spans.push(Span::styled(format!(" · theme.toml {first}{more}"), Style::new().fg(theme().error)));
+    for (file, problems) in [("theme.toml", theme_problems()), ("config.toml", config_problems())] {
+        if let [first, rest @ ..] = problems {
+            let more = if rest.is_empty() { String::new() } else { format!(" (+{} more)", rest.len()) };
+            spans.push(Span::styled(format!(" · {file} {first}{more}"), Style::new().fg(theme().error)));
+        }
     }
     render_line(Line::from(spans), header, buf);
 
-    if let Some(&li) = lanes.get(app.selected) {
+    if let Some(li) = app.sel_row(&lanes).map(|r| lanes[r]) {
         let lane = &app.state.lanes[li];
         let color = theme().status(lane.status);
-        let glyph = if lane.is_open() { '●' } else { '✕' };
+        let glyph = if lane.is_open() { status_glyph(lane.status) } else { '✕' };
         let when = match lane.closed_ms {
             None => format!(" {}", fmt_dur(app.now_ms - lane.last_ms())),
             Some(c) => format!(" closed {}", hms(c)),
@@ -653,8 +691,9 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
             .ctx_at(&lane.sessions, lane.closed_ms.unwrap_or(app.now_ms))
             .map(|c| format!(" · {} ctx", fmt_tokens(c)))
             .unwrap_or_default();
+        let tab = app.state.tab_label(li).map(|t| format!(" · tab {t}")).unwrap_or_default();
         let text = format!(
-            " {} · {} · {} · {}{when}{ctx} · {} steps · {}",
+            " {} · {}{tab} · {} · {}{when}{ctx} · {} steps · {}",
             lane.label(),
             app.state.workspace_label(li),
             lane.agent.as_deref().unwrap_or("-"),
@@ -697,6 +736,7 @@ pub(crate) mod tests {
         state.lanes[i].agent = Some("omp".into());
         state.set_status(i, AgentStatus::Working, 2000);
         state.set_status(i, AgentStatus::Blocked, 5000);
+        state.assign_slots();
         let mut app = App::new(state, view, orient, 8500);
         app.bucket_idx = 0;
         app
@@ -724,6 +764,7 @@ pub(crate) mod tests {
         let mut app = sample_app(ViewKind::Time, orient);
         let i = app.state.open("w1:p2", "w1", 100, Mark::Seen, AgentStatus::Idle, true);
         app.state.lanes[i].agent = Some("omp".into());
+        app.state.assign_slots();
         app
     }
 
@@ -731,24 +772,61 @@ pub(crate) mod tests {
     fn vertical_keys_swap_lane_and_time_axes() {
         let mut app = two_lanes(Orient::Vertical);
         press(&mut app, 'l');
-        assert_eq!(app.selected, 1);
+        assert_eq!(sel(&app), Some(1));
         press(&mut app, 'k');
         assert!(!app.follow);
         let back = app.view_end_ms;
         assert!(back < app.now_ms);
         press(&mut app, 'j');
         assert!(app.view_end_ms > back);
-        assert_eq!(app.selected, 1, "time keys leave the selection alone");
+        assert_eq!(sel(&app), Some(1), "time keys leave the selection alone");
     }
 
     #[test]
     fn horizontal_j_selects_next_lane() {
         let mut app = two_lanes(Orient::Horizontal);
         press(&mut app, 'j');
-        assert_eq!(app.selected, 1);
+        assert_eq!(sel(&app), Some(1));
         press(&mut app, 'j');
-        assert_eq!(app.selected, 1, "clamped");
+        assert_eq!(sel(&app), Some(1), "clamped");
         assert!(app.follow);
+    }
+
+    fn sel(app: &App) -> Option<usize> {
+        app.sel_row(&app.state.visible_lanes())
+    }
+
+    #[test]
+    fn selection_stays_on_its_lane_when_a_new_lane_sorts_before_it() {
+        let mut state = State::default();
+        let b = state.open("b:p1", "b", 0, Mark::Seen, AgentStatus::Idle, true);
+        state.lanes[b].agent = Some("omp".into());
+        let mut app = App::new(state, ViewKind::Time, Orient::Horizontal, 1000);
+        let rows = app.state.visible_lanes();
+        app.select_row(&rows, 0);
+        let id = app.selected;
+        let a = app.state.open("a:p1", "a", 10, Mark::Seen, AgentStatus::Idle, true);
+        app.state.lanes[a].agent = Some("omp".into());
+        assert_eq!(app.selected, id);
+        assert_eq!(sel(&app), Some(1), "the highlight follows the lane to its new row");
+    }
+
+    #[test]
+    fn every_status_has_its_own_shape() {
+        use AgentStatus::*;
+        let mut state = State::default();
+        for (k, s) in [Working, Blocked, Done, Idle, Unknown].into_iter().enumerate() {
+            let i = state.open(&format!("w1:p{k}"), "w1", k as i64, Mark::Seen, Unknown, true);
+            state.lanes[i].agent = Some("omp".into());
+            state.set_status(i, s, 1000);
+        }
+        state.assign_slots();
+        let mut app = App::new(state, ViewKind::Time, Orient::Horizontal, 8500);
+        app.bucket_idx = 0;
+        let buf = render(&mut app, GUTTER + 12, 9);
+        let gutter: Vec<String> = (2..7).map(|y| buf[(0, y)].symbol().to_string()).collect();
+        assert_eq!(gutter, ["●", "▲", "✓", "○", "·"]);
+        assert!(row(&buf, 3, GUTTER, GUTTER + 12).contains('╍'), "{}", row(&buf, 3, GUTTER, GUTTER + 12));
     }
 
     #[test]

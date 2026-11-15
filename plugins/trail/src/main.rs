@@ -1,3 +1,4 @@
+mod config;
 mod follow;
 mod herdr;
 mod history;
@@ -45,8 +46,19 @@ struct Opts {
     height: u16,
 }
 
+fn parse_orient(v: &str) -> anyhow::Result<Orient> {
+    match v {
+        "h" => Ok(Orient::Horizontal),
+        "v" => Ok(Orient::Vertical),
+        v => bail!("unknown orientation {v:?}"),
+    }
+}
+
 fn parse_opts(args: &[String]) -> anyhow::Result<Opts> {
-    let mut o = Opts { popup: false, dump: false, view: ViewKind::Time, orient: Orient::Horizontal, width: 120, height: 30 };
+    let cfg = config::config();
+    let view = cfg.start_view.as_deref().and_then(ViewKind::from_name).unwrap_or(ViewKind::Time);
+    let orient = cfg.start_orient.as_deref().and_then(|o| parse_orient(o).ok()).unwrap_or(Orient::Horizontal);
+    let mut o = Opts { popup: false, dump: false, view, orient, width: 120, height: 30 };
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut value = || it.next().with_context(|| format!("{a} needs a value"));
@@ -54,22 +66,10 @@ fn parse_opts(args: &[String]) -> anyhow::Result<Opts> {
             "--popup" => o.popup = true,
             "--dump" => o.dump = true,
             "--view" => {
-                o.view = match value()?.as_str() {
-                    "time" => ViewKind::Time,
-                    "sequence" => ViewKind::Sequence,
-                    "area" => ViewKind::Area,
-                    "heat" => ViewKind::Heat,
-                    "dash" => ViewKind::Dash,
-                    v => bail!("unknown view {v:?}"),
-                }
+                let v = value()?;
+                o.view = ViewKind::from_name(v).with_context(|| format!("unknown view {v:?}"))?;
             }
-            "--orient" => {
-                o.orient = match value()?.as_str() {
-                    "h" => Orient::Horizontal,
-                    "v" => Orient::Vertical,
-                    v => bail!("unknown orientation {v:?}"),
-                }
-            }
+            "--orient" => o.orient = parse_orient(value()?)?,
             "--width" => o.width = value()?.parse().context("--width")?,
             "--height" => o.height = value()?.parse().context("--height")?,
             other => bail!("unknown argument {other:?}"),
@@ -132,7 +132,9 @@ fn start(o: &Opts) -> (App, bool) {
     let now = now_ms();
     let mut state = State::new(self_pane());
     for e in history::load_since(&history::log_dir(), &history::session_name(), now, now - HISTORY_MS) {
-        state.apply_log(&e);
+        if let Some(h) = e.host_event() {
+            state.apply(&h, e.ts_ms, false);
+        }
     }
     let mut app = App::new(state, o.view, o.orient, now);
     app.popup = o.popup;
@@ -210,7 +212,9 @@ fn run_tui(o: &Opts) -> anyhow::Result<()> {
                         dirty = true;
                     }
                     Msg::Event(g, env) if g == generation => {
-                        app.state.apply_envelope(&env, now_ms());
+                        if let Some(h) = herdr::host_event(&env) {
+                            app.state.apply(&h, now_ms(), true);
+                        }
                         app.refresh_usage();
                         dirty = true;
                     }

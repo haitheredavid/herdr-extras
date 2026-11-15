@@ -49,8 +49,8 @@ grid = "#48484e"         # chart gridlines
 accent = "cyan"          # view name in the header
 error = "red"            # socket and theme errors
 fill_alpha = 0.3         # how much of a series' color its fill lays over what's behind
-series_from = 0.25       # where along `series` the used stretch starts
-# The one color ramp (viridis): agents are spread evenly along it from `series_from`, and HEAT
+series_from = 0.40       # where along `series` the used stretch starts
+# The one color ramp (viridis): each agent keeps a fixed spot along it from `series_from`, and HEAT
 # shades along the same stretch, so every view draws from the same colors.
 series = ["#440154", "#482475", "#414487", "#355f8d", "#2a788e", "#21918c", "#22a884", "#44bf70", "#7ad151", "#bddf26", "#fde725"]
 heat_blocked = "red"

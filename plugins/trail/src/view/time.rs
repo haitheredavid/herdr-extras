@@ -95,9 +95,9 @@ mod tests {
         let mut app = sample_app(ViewKind::Time, Orient::Horizontal);
         // Header, axis row, lane row, detail, footer.
         let buf = render(&mut app, GUTTER + 12, 5);
-        assert_eq!(row(&buf, 2, GUTTER, GUTTER + 12), "◆─●━━●━━▸");
+        assert_eq!(row(&buf, 2, GUTTER, GUTTER + 12), "◆─●━━▲╍╍▸");
         assert_eq!(buf[(GUTTER + 8, 2)].fg, theme().blocked, "head in the current status color");
-        assert_eq!(buf[(GUTTER + 1, 2)].fg, theme().series_color(0, 1), "lines take the agent's color");
+        assert_eq!(buf[(GUTTER + 1, 2)].fg, theme().idle, "lines take their status color");
         assert_eq!(buf[(GUTTER + 2, 2)].fg, theme().working, "status nodes keep status colors");
         assert!(row(&buf, 0, 0, GUTTER + 12).starts_with("trail · TIME · ↔"));
     }
@@ -108,7 +108,7 @@ mod tests {
         // Header, lane header row + 12 cells, detail, footer.
         let buf = render(&mut app, AXIS_W + 6, 16);
         let cells = col(&buf, AXIS_W + 2, 2, 11);
-        assert_eq!(cells, ["◆", "│", "●", "┃", "┃", "●", "┃", "┃", "▾"]);
+        assert_eq!(cells, ["◆", "│", "●", "┃", "┃", "▲", "╏", "╏", "▾"]);
         assert_eq!(buf[(AXIS_W + 2, 11)].symbol(), " ", "nothing after now");
     }
 
@@ -127,7 +127,7 @@ mod tests {
         let mut app = with_usage(Orient::Horizontal);
         // Header, axis row, 4-row band, detail, footer.
         let buf = render(&mut app, GUTTER + 12, 8);
-        assert_eq!(row(&buf, 2, GUTTER, GUTTER + 12), "    ┏●━━▸", "level 3: 400 of 400");
+        assert_eq!(row(&buf, 2, GUTTER, GUTTER + 12), "    ┏▲╍╍▸", "level 3: 400 of 400");
         assert_eq!(row(&buf, 3, GUTTER, GUTTER + 12), "    ┃");
         assert_eq!(row(&buf, 4, GUTTER, GUTTER + 12), "◆─●━┛", "level 1: 100 of 400");
         assert_eq!(row(&buf, 3, 2, GUTTER), "400 ctx");
@@ -136,7 +136,7 @@ mod tests {
 
         app.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
         let buf = render(&mut app, GUTTER + 12, 8);
-        assert_eq!(row(&buf, 2, GUTTER, GUTTER + 12), "◆─●━━●━━▸", "u flattens the bands");
+        assert_eq!(row(&buf, 2, GUTTER, GUTTER + 12), "◆─●━━▲╍╍▸", "u flattens the bands");
     }
 
     #[test]
