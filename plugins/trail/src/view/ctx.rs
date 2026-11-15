@@ -44,11 +44,11 @@ pub(super) fn pts(lane: &Lane, store: &Store, max: u64, start: i64, bucket: i64,
 
 /// `Σ` row under the lanes, when every row is shown and one is spare: total context now and cost.
 pub(super) fn totals(buf: &mut Buffer, grid: &Grid, app: &App, rows: &[usize]) {
-    let (above, shown, below) = app.shown;
+    let (above, _, below) = app.shown;
     if grid.orient != Orient::Horizontal || above > 0 || below > 0 {
         return;
     }
-    let y = grid.body.y + grid.lead + shown as u16;
+    let Some(y) = grid.placed(app.lane_scroll).last().map(|&(k, start)| start + grid.size(k).0) else { return };
     if y >= grid.body.bottom() {
         return;
     }

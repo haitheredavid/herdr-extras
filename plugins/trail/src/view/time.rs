@@ -2,10 +2,8 @@
 //! duration. Also the time-axis geometry the other timed lenses share.
 
 use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
 use ratatui::style::Style;
 
-use super::gutter::Cols;
 use super::{App, Cell, Grid, Orient, Pt, Scale, head_cell, line_cell, node_cell, put_str, time_ticks};
 use crate::model::{Lane, status_at};
 use crate::session::Store;
@@ -14,14 +12,6 @@ use crate::theme::theme;
 /// ↕ axis gutter: `HH:MM` ticks when they're a minute or more apart, else `HH:MM:SS`, plus a space.
 pub(super) fn axis_w(bucket_ms: i64) -> u16 {
     if bucket_ms * 4 >= 60_000 { 6 } else { 9 }
-}
-
-/// Cells along the time axis in `body` for the app's orientation.
-pub(super) fn cells(app: &App, body: Rect) -> usize {
-    match app.orient {
-        Orient::Horizontal => Cols::fit(body.width).strip(body.width) as usize,
-        Orient::Vertical => body.height.saturating_sub(1) as usize,
-    }
 }
 
 /// Start of the first cell: the last cell holds the view's end (now while following).
@@ -88,13 +78,13 @@ mod tests {
     #[test]
     fn horizontal_lane_ends_at_now_on_the_far_edge() {
         let mut app = sample_app(1, Orient::Horizontal);
-        // Header, axis row, lane row. 27 strip cells from column 33, 1 s buckets fit 8.5 s.
-        let buf = render(&mut app, 60, 3);
-        assert_eq!(row(&buf, 2, 33, 60).trim_start(), "◆─●━━▲╍╍▸");
-        assert_eq!(buf[(59, 2)].symbol(), "▸", "now sits in the last cell");
-        assert_eq!(buf[(59, 2)].fg, theme().blocked, "head in the current status color");
-        assert_eq!(buf[(52, 2)].fg, theme().idle, "lines take their status color");
-        assert_eq!(buf[(53, 2)].fg, theme().working, "status nodes keep status colors");
+        // Header, axis row, lane row. 29 strip cells from column 33, 1 s buckets fit 8.5 s.
+        let buf = render(&mut app, 80, 3);
+        assert_eq!(row(&buf, 2, 33, 62).trim_start(), "◆─●━━▲╍╍▸");
+        assert_eq!(buf[(61, 2)].symbol(), "▸", "now sits in the last cell");
+        assert_eq!(buf[(61, 2)].fg, theme().blocked, "head in the current status color");
+        assert_eq!(buf[(54, 2)].fg, theme().idle, "lines take their status color");
+        assert_eq!(buf[(55, 2)].fg, theme().working, "status nodes keep status colors");
     }
 
     #[test]
@@ -124,11 +114,11 @@ mod tests {
     #[test]
     fn horizontal_band_rises_with_context() {
         let mut app = with_usage(Orient::Horizontal);
-        // Header, axis row, 4-row band from row 2; the lane starts at strip cell 18 (column 51).
-        let buf = render(&mut app, 60, 7);
-        assert_eq!(row(&buf, 2, 51, 60), "    ┏▲╍╍▸", "level 3: 400 of 400");
-        assert_eq!(row(&buf, 3, 51, 60), "    ┃");
-        assert_eq!(row(&buf, 4, 51, 60), "◆─●━┛", "level 1: 100 of 400");
+        // Header, axis row, 4-row band from row 2; the lane starts at strip cell 20 (column 53).
+        let buf = render(&mut app, 80, 7);
+        assert_eq!(row(&buf, 2, 53, 62), "    ┏▲╍╍▸", "level 3: 400 of 400");
+        assert_eq!(row(&buf, 3, 53, 62), "    ┃");
+        assert_eq!(row(&buf, 4, 53, 62), "◆─●━┛", "level 1: 100 of 400");
         assert_eq!(row(&buf, 3, 3, 33), "ctx 400 · peak 400");
         assert_eq!(row(&buf, 4, 3, 33), "$0.75 · 2 reqs");
         assert_eq!(row(&buf, 5, 3, 33), "omp · w1:p1");
@@ -136,16 +126,16 @@ mod tests {
         assert!(row(&wide, 0, 0, 120).contains("ctx≤400"), "{}", row(&wide, 0, 0, 120));
 
         key(&mut app, 'Z');
-        let buf = render(&mut app, 60, 7);
-        assert_eq!(row(&buf, 2, 51, 60), "◆─●━━▲╍╍▸", "compact density flattens the bands");
+        let buf = render(&mut app, 80, 7);
+        assert_eq!(row(&buf, 2, 53, 62), "◆─●━━▲╍╍▸", "compact density flattens the bands");
     }
 
     #[test]
     fn bands_collapse_when_they_dont_fit() {
         let mut app = with_usage(Orient::Horizontal);
         // Header, axis row and three lane rows: a 4-row band doesn't fit.
-        let buf = render(&mut app, 60, 5);
-        assert_eq!(row(&buf, 2, 51, 60), "◆─●━━▲╍╍▸");
+        let buf = render(&mut app, 80, 5);
+        assert_eq!(row(&buf, 2, 53, 62), "◆─●━━▲╍╍▸");
         assert_eq!(app.band_max, None);
     }
 

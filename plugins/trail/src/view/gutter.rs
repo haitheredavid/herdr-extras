@@ -7,7 +7,9 @@ use std::collections::HashMap;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
+use ratatui::text::Span;
 
+use super::layout::SizeClass;
 use super::{App, fmt_dur, hm, put_str, status_glyph, truncate};
 use crate::model::{AgentStatus, HISTORY_MS, State, status_time};
 use crate::session::fmt_tokens;
@@ -18,10 +20,14 @@ const MIN_STRIP: u16 = 24;
 const CTX_W: u16 = 6;
 const COST_W: u16 = 7;
 const WORK_W: u16 = 5;
+/// The band's group column.
+pub(super) const GROUP_W: u16 = 10;
 
 /// Gutter column widths for one frame width.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Cols {
+    /// Group column before the gutter (bands only), 0 without.
+    pub group_w: u16,
     pub name_w: u16,
     /// 0 drops the state column.
     pub state_w: u16,
@@ -31,15 +37,25 @@ pub(super) struct Cols {
 }
 
 impl Cols {
-    pub fn fit(width: u16) -> Cols {
+    /// A sidebar keeps state and context and gives the strip what's left (maybe nothing); bands
+    /// and panels keep a usable strip and add right-hand columns while they fit.
+    pub fn fit(width: u16, class: SizeClass, group_col: bool) -> Cols {
+        let group_w = if group_col { GROUP_W } else { 0 };
+        if class == SizeClass::Sidebar {
+            let state_w = if width >= 40 { 14 } else { 0 };
+            let name_w = width.saturating_sub(3 + 15 + 6 + 9).clamp(10, 24);
+            return Cols { group_w, name_w, state_w, ctx: width >= 50, cost: false, work: false };
+        }
+        let width = width.saturating_sub(group_w);
         let mut c = Cols {
+            group_w,
             name_w: (width / 6).clamp(14, 24),
             state_w: if width >= 60 { 14 } else { 0 },
             ctx: false,
             cost: false,
             work: false,
         };
-        let left = c.left();
+        let left = c.left() - group_w;
         let mut right = 0;
         for (w, keep) in [(CTX_W, &mut c.ctx), (COST_W, &mut c.cost), (WORK_W, &mut c.work)] {
             if left + MIN_STRIP + right + w > width {
@@ -51,9 +67,9 @@ impl Cols {
         c
     }
 
-    /// Cells left of the strip: color bar, status, gap, name, gap, state.
+    /// Cells left of the strip: group column, color bar, status, gap, name, gap, state.
     pub fn left(&self) -> u16 {
-        3 + self.name_w + 1 + self.state_w + u16::from(self.state_w > 0)
+        self.group_w + 3 + self.name_w + 1 + self.state_w + u16::from(self.state_w > 0)
     }
 
     /// Cells right of the strip.
@@ -109,12 +125,12 @@ pub(super) fn draw_row(
     selected: bool,
 ) {
     let lane = &app.state.lanes[li];
-    let (x, now) = (body.x, app.now_ms);
+    let (x, now) = (body.x + cols.group_w, app.now_ms);
     let dim = Style::new().fg(theme().dim);
     let end = lane.closed_ms.unwrap_or(now);
     let sel = if selected { Style::new().add_modifier(Modifier::REVERSED) } else { Style::new() };
     if selected {
-        for cx in x..(x + cols.left()).min(body.right()) {
+        for cx in x..(body.x + cols.left()).min(body.right()) {
             buf[(cx, y)].set_style(sel);
         }
     }
@@ -165,11 +181,24 @@ pub(super) fn draw_row(
             if spend.requests > 0 { format!("{} · {} reqs", fmt_cost(cost), spend.requests) } else { "no usage".into() },
             format!("{}{tab} · {}", lane.agent.as_deref().unwrap_or("-"), lane.pane_id),
         ];
-        let w = cols.left().saturating_sub(4) as usize;
+        let w = (cols.left() - cols.group_w).saturating_sub(4) as usize;
         for (k, text) in detail.iter().enumerate().take(rows as usize - 1) {
             put_str(buf, body, x + 3, y + 1 + k as u16, &truncate(text, w), dim);
         }
     }
+}
+
+/// `▲1 ●2 ○1`: a group's open agents by status, in status colors.
+pub(super) fn rollup(counts: &[usize; 5]) -> Vec<Span<'static>> {
+    let statuses = [AgentStatus::Blocked, AgentStatus::Working, AgentStatus::Done, AgentStatus::Idle, AgentStatus::Unknown];
+    let mut out = Vec::new();
+    for (s, &n) in statuses.iter().zip(counts).filter(|(_, n)| **n > 0) {
+        if !out.is_empty() {
+            out.push(Span::raw(" "));
+        }
+        out.push(Span::styled(format!("{}{n}", status_glyph(*s)), Style::new().fg(theme().status(*s))));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -179,12 +208,16 @@ mod tests {
 
     #[test]
     fn cols_drop_by_priority() {
-        let c = Cols::fit(60);
+        let c = Cols::fit(60, SizeClass::Panel, false);
         assert_eq!((c.left(), c.state_w, c.right()), (33, 14, 0));
-        let c = Cols::fit(120);
+        let c = Cols::fit(120, SizeClass::Band, false);
         assert_eq!(c.name_w, 20);
         assert!(c.ctx && c.cost && c.work);
-        assert_eq!(Cols::fit(40).state_w, 0);
+        assert_eq!(Cols::fit(40, SizeClass::Panel, false).state_w, 0);
+        let c = Cols::fit(120, SizeClass::Band, true);
+        assert_eq!((c.group_w, c.name_w), (GROUP_W, 18), "the group column comes out of the gutter's share");
+        let c = Cols::fit(50, SizeClass::Sidebar, false);
+        assert_eq!((c.name_w, c.state_w, c.ctx, c.cost), (17, 14, true, false));
     }
 
     #[test]

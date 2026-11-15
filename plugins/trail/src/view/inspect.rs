@@ -6,6 +6,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 
 use super::gutter::fmt_cost;
+use super::layout::SizeClass;
 use super::{App, Mode, Orient, fmt_dur, hm, hms, node_glyph, put_str, status_glyph, truncate};
 use crate::model::{HISTORY_MS, Mark, status_time};
 use crate::session::fmt_tokens;
@@ -16,10 +17,12 @@ const BOTTOM_H: u16 = 12;
 const SPARK: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
 /// Splits `body` into the lanes' area and the inspector's when the inspector shows; true when it
-/// sits under the lanes.
-pub(super) fn place(app: &App, body: Rect) -> Option<(Rect, Rect, bool)> {
-    let bottom = app.mode == Mode::Lanes && app.orient == Orient::Vertical;
+/// sits under the lanes. A sidebar shows it under `rows` rows when 12 more are free.
+pub(super) fn place(app: &App, body: Rect, rows: usize) -> Option<(Rect, Rect, bool)> {
+    let sidebar = app.class == SizeClass::Sidebar && app.mode == Mode::Lanes && app.orient == Orient::Horizontal;
+    let bottom = app.mode == Mode::Lanes && (app.orient == Orient::Vertical || sidebar);
     let auto = match app.mode {
+        Mode::Lanes if sidebar => usize::from(body.height) >= 1 + rows * 2 + usize::from(BOTTOM_H),
         Mode::Lanes if bottom => body.height >= 30,
         Mode::Lanes => body.width >= 140,
         Mode::Usage => false,

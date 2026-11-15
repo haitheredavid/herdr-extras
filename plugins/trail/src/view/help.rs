@@ -18,6 +18,8 @@ const HELP: Sections = &[
         "MOVE",
         &[
             ("j/k", "next/previous agent (arrows follow the screen)"),
+            ("J/K", "next/previous group"),
+            ("b", "next blocked agent"),
             ("h/l H/L", "back/forward in time, a quarter or a whole strip"),
             ("Home/End", "first/last agent; PgUp/PgDn a page"),
             ("f", "follow now"),
@@ -36,7 +38,18 @@ const HELP: Sections = &[
             ("i", "inspector on/off"),
             ("o", "agents as rows or columns"),
             ("+/-", "zoom time in/out"),
+        ],
+    ),
+    (
+        "FILTER",
+        &[
+            ("/", "search names, tasks, workspaces, folders"),
+            ("a", "only active agents (blocked ones always show)"),
             ("c", "show closed agents"),
+            ("w", "scope: all, this workspace, this tab"),
+            ("s", "sort: stable, attention, recent, name"),
+            ("g", "group: workspace, tab, none"),
+            ("x", "fold the group (Space or Enter opens it)"),
         ],
     ),
     (

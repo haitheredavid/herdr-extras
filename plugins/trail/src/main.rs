@@ -4,24 +4,29 @@ mod herdr;
 mod history;
 mod model;
 mod open;
+mod prefs;
 mod record;
 mod session;
 mod theme;
 mod view;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, bail};
 use ratatui::buffer::Buffer;
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+};
+use ratatui::crossterm::execute;
 use ratatui::layout::Rect;
 use serde_json::json;
 
+use config::config;
 use herdr::{Msg, Subscriber};
-use model::{HISTORY_MS, State};
-use view::{App, Orient, preset_from_name};
+use model::{HISTORY_MS, State, due_notifications};
+use view::{App, Orient, fmt_dur, preset_from_name};
 
 const SNAPSHOT_EVERY: Duration = Duration::from_secs(5);
 const RETRY_EVERY: Duration = Duration::from_secs(2);
@@ -40,9 +45,9 @@ fn self_pane() -> Option<String> {
 struct Opts {
     popup: bool,
     dump: bool,
-    /// Preset `1`-`5` from a `--view` name.
-    view: u8,
-    orient: Orient,
+    /// `--view` as preset `1`-`5`; None leaves it to `config.toml` and the remembered settings.
+    view: Option<u8>,
+    orient: Option<Orient>,
     width: u16,
     height: u16,
     /// `--dump` presses these before drawing.
@@ -90,10 +95,7 @@ fn parse_orient(v: &str) -> anyhow::Result<Orient> {
 }
 
 fn parse_opts(args: &[String]) -> anyhow::Result<Opts> {
-    let cfg = config::config();
-    let view = cfg.start_view.as_deref().and_then(preset_from_name).unwrap_or(1);
-    let orient = cfg.start_orient.as_deref().and_then(|o| parse_orient(o).ok()).unwrap_or(Orient::Horizontal);
-    let mut o = Opts { popup: false, dump: false, view, orient, width: 120, height: 30, keys: Vec::new() };
+    let mut o = Opts { popup: false, dump: false, view: None, orient: None, width: 120, height: 30, keys: Vec::new() };
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut value = || it.next().with_context(|| format!("{a} needs a value"));
@@ -102,9 +104,9 @@ fn parse_opts(args: &[String]) -> anyhow::Result<Opts> {
             "--dump" => o.dump = true,
             "--view" => {
                 let v = value()?;
-                o.view = preset_from_name(v).with_context(|| format!("unknown view {v:?}"))?;
+                o.view = Some(preset_from_name(v).with_context(|| format!("unknown view {v:?}"))?);
             }
-            "--orient" => o.orient = parse_orient(value()?)?,
+            "--orient" => o.orient = Some(parse_orient(value()?)?),
             "--width" => o.width = value()?.parse().context("--width")?,
             "--height" => o.height = value()?.parse().context("--height")?,
             "--keys" => o.keys = parse_keys(value()?)?,
@@ -163,7 +165,8 @@ fn refresh(app: &mut App) -> bool {
     }
 }
 
-/// App with the logged history folded in, then the live snapshot on top.
+/// App with the logged history folded in, then the live snapshot on top. Settings stack from the
+/// defaults through `config.toml [start]` and the remembered ones (not for `--dump`) to the flags.
 fn start(o: &Opts) -> (App, bool) {
     let now = now_ms();
     let mut state = State::new(self_pane());
@@ -172,7 +175,19 @@ fn start(o: &Opts) -> (App, bool) {
             state.apply(&h, e.ts_ms, false);
         }
     }
-    let mut app = App::new(state, o.view, o.orient, now);
+    let cfg = config();
+    let preset = cfg.start_view.as_deref().and_then(preset_from_name).unwrap_or(1);
+    let orient = cfg.start_orient.as_deref().and_then(|v| parse_orient(v).ok()).unwrap_or(Orient::Horizontal);
+    let mut app = App::new(state, preset, orient, now);
+    if !o.dump && cfg.remember {
+        prefs::load(&prefs::prefs_path(), &mut app);
+    }
+    if let Some(v) = o.view {
+        app.preset(v);
+    }
+    if let Some(orient) = o.orient {
+        app.orient = orient;
+    }
     app.popup = o.popup;
     let connected = refresh(&mut app);
     (app, connected)
@@ -181,7 +196,7 @@ fn start(o: &Opts) -> (App, bool) {
 fn dump(o: &Opts) {
     let (mut app, _) = start(o);
     let area = Rect::new(0, 0, o.width, o.height);
-    // A first draw sets the geometry keys depend on (time cells, scroll).
+    // A first draw sets the geometry keys depend on (time cells, scroll, layout).
     view::draw(&mut Buffer::empty(area), area, &mut app);
     for &k in &o.keys {
         app.on_key(k);
@@ -194,6 +209,26 @@ fn dump(o: &Opts) {
     }
 }
 
+/// Sends a herdr notification for each agent blocked past `[notify] blocked_after`, once per
+/// episode; a failure shows in the header.
+fn notify_blocked(app: &mut App, sent: &mut HashSet<(u64, usize)>) {
+    let Some(after) = config().blocked_after_ms else { return };
+    let now = now_ms();
+    for key in due_notifications(&app.state, now, after, sent) {
+        sent.insert(key);
+        let Some(li) = app.state.lane_by_id(key.0) else { continue };
+        let lane = &app.state.lanes[li];
+        let params = json!({
+            "title": format!("{} blocked {}", lane.label(), fmt_dur(now - lane.last_ms())),
+            "body": format!("{} · {}", app.state.workspace_label(li), lane.agent.as_deref().unwrap_or("-")),
+            "sound": "request",
+        });
+        if let Err(e) = herdr::request("notification.show", params) {
+            app.error = Some(format!("notification.show: {e:#}"));
+        }
+    }
+}
+
 fn run_tui(o: &Opts) -> anyhow::Result<()> {
     let (mut app, connected) = start(o);
     let (tx, rx) = mpsc::channel::<Msg>();
@@ -201,9 +236,14 @@ fn run_tui(o: &Opts) -> anyhow::Result<()> {
     let mut sub: Option<Subscriber> = None;
     let mut sub_ids: BTreeSet<String> = BTreeSet::new();
     let mut resubscribe_at: Option<Instant> = None;
+    let mut notified: HashSet<(u64, usize)> = HashSet::new();
 
     let mut next_snapshot = Instant::now() + if connected { SNAPSHOT_EVERY } else { RETRY_EVERY };
     let mut terminal = ratatui::init();
+    let mouse = config().mouse;
+    if mouse {
+        execute!(std::io::stdout(), EnableMouseCapture)?;
+    }
     let result = (|| -> anyhow::Result<()> {
         // ratatui writes a style reset and cursor hide on every draw, even an unchanged one, and
         // each write makes herdr recomposite the pane; so draw only on change or once a second
@@ -222,15 +262,21 @@ fn run_tui(o: &Opts) -> anyhow::Result<()> {
             }
 
             let wait = next_draw.saturating_duration_since(Instant::now()).min(Duration::from_millis(100));
-            if event::poll(wait)?
-                && let Event::Key(key) = event::read()?
-                && key.kind == KeyEventKind::Press
-            {
-                if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-                    return Ok(());
+            if event::poll(wait)? {
+                match event::read()? {
+                    Event::Key(key) if key.kind == KeyEventKind::Press => {
+                        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                            return Ok(());
+                        }
+                        app.on_key(key);
+                        dirty = true;
+                    }
+                    Event::Mouse(m) => {
+                        app.on_mouse(m);
+                        dirty = true;
+                    }
+                    _ => {}
                 }
-                app.on_key(key);
-                dirty = true;
             }
             if let Some(pane_id) = app.focus_requested.take() {
                 match herdr::request("pane.focus", json!({ "pane_id": pane_id })) {
@@ -245,6 +291,7 @@ fn run_tui(o: &Opts) -> anyhow::Result<()> {
             if app.quit {
                 return Ok(());
             }
+            notify_blocked(&mut app, &mut notified);
 
             while let Ok(msg) = rx.try_recv() {
                 match msg {
@@ -303,7 +350,13 @@ fn run_tui(o: &Opts) -> anyhow::Result<()> {
     if let Some(s) = sub {
         s.stop();
     }
+    if mouse {
+        let _ = execute!(std::io::stdout(), DisableMouseCapture);
+    }
     ratatui::restore();
+    if config().remember {
+        let _ = prefs::save(&prefs::prefs_path(), &app);
+    }
     result
 }
 

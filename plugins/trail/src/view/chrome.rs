@@ -53,7 +53,8 @@ impl Seg {
     }
 }
 
-pub(super) fn draw_header(buf: &mut Buffer, area: Rect, mut segs: Vec<Seg>) {
+/// Draws the segments that fit; returns where each input segment landed (None when dropped).
+pub(super) fn draw_header(buf: &mut Buffer, area: Rect, mut segs: Vec<Seg>) -> Vec<Option<Rect>> {
     let mut order: Vec<usize> = (0..segs.len()).collect();
     order.sort_by_key(|&i| segs[i].prio);
     // Separators are counted for every segment; the first left one draws none, so 3 cells spare.
@@ -72,17 +73,29 @@ pub(super) fn draw_header(buf: &mut Buffer, area: Rect, mut segs: Vec<Seg>) {
     let dim = Style::new().fg(theme().dim);
     let mut left: Vec<Span<'static>> = Vec::new();
     let mut right: Vec<Span<'static>> = Vec::new();
-    for seg in segs.into_iter().zip(keep).filter_map(|(s, k)| k.then_some(s)) {
-        let side = if seg.right { &mut right } else { &mut left };
+    // (segment, side, offset within its side, width)
+    let mut placed: Vec<(usize, bool, u16, u16)> = Vec::new();
+    let (mut left_w, mut right_w) = (0u16, 0u16);
+    for (i, seg) in segs.into_iter().enumerate().filter(|(i, _)| keep[*i]) {
+        let (side, w) = if seg.right { (&mut right, &mut right_w) } else { (&mut left, &mut left_w) };
         if !side.is_empty() {
-            side.push(Span::styled(if seg.right { "  " } else { " │ " }, dim));
+            let sep = if seg.right { "  " } else { " │ " };
+            *w += sep.chars().count() as u16;
+            side.push(Span::styled(sep, dim));
         }
+        let width = seg.width();
+        placed.push((i, seg.right, *w, width));
+        *w += width;
         side.extend(seg.spans);
     }
-    let right_w: u16 = right.iter().map(|s| s.content.chars().count() as u16).sum();
     Line::from(left).render(area, buf);
     let x = area.right().saturating_sub(right_w).max(area.x);
     Line::from(right).render(Rect::new(x, area.y, area.right() - x, 1), buf);
+    let mut rects = vec![None; keep.len()];
+    for (i, right, at, width) in placed {
+        rects[i] = Some(Rect::new(if right { x } else { area.x } + at, area.y, width, 1));
+    }
+    rects
 }
 
 #[cfg(test)]

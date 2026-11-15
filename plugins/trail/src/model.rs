@@ -1,7 +1,7 @@
 //! The trail state: one lane per pane lifetime, one step per state change, folded from the history
 //! log, snapshots and live events through one `HostEvent` fold.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -189,6 +189,18 @@ pub fn status_at(lane: &Lane, t_ms: i64) -> Option<AgentStatus> {
     lane.steps.iter().take_while(|s| s.at_ms <= t_ms).last().map(|s| s.status)
 }
 
+/// Blocked episodes due a notification: open agent lanes blocked for at least `after_ms` and not in
+/// `sent`, keyed by (lane id, step count) so each episode notifies once.
+pub fn due_notifications(state: &State, now_ms: i64, after_ms: i64, sent: &HashSet<(u64, usize)>) -> Vec<(u64, usize)> {
+    state
+        .lanes
+        .iter()
+        .filter(|l| l.visible() && l.is_open() && l.status == AgentStatus::Blocked && now_ms - l.last_ms() >= after_ms)
+        .map(|l| (l.id, l.steps.len()))
+        .filter(|k| !sent.contains(k))
+        .collect()
+}
+
 /// Time a lane spent in each status within a window.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StatusTime {
@@ -234,10 +246,95 @@ pub struct State {
     next_slot: usize,
 }
 
-/// Which lanes the views show.
-#[derive(Debug, Clone, Default)]
+/// Which lanes the views show, how they sort, and how they group.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Query {
     pub show_closed: bool,
+    /// Hide agents idle, done or unknown for longer than the quiet window.
+    pub active_only: bool,
+    pub scope: Scope,
+    /// Case-insensitive; matches label, task, workspace and cwd.
+    pub search: String,
+    pub sort: Sort,
+    pub group: Group,
+    /// Keys of folded groups.
+    pub collapsed: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Scope {
+    #[default]
+    All,
+    /// The focused workspace.
+    Workspace,
+    /// The focused tab.
+    Tab,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Sort {
+    /// Workspace, then open time.
+    #[default]
+    Stable,
+    /// Blocked first (longest waiting first), then working, done, idle, unknown, closed.
+    Attention,
+    /// Latest change first.
+    Recent,
+    Name,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Group {
+    #[default]
+    Workspace,
+    Tab,
+    None,
+}
+
+/// One row of the lanes list.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Row {
+    /// A group's header; `counts` are its open agents by status, `[blocked, working, done, idle, unknown]`.
+    Group {
+        key: String,
+        label: String,
+        counts: [usize; 5],
+        collapsed: bool,
+    },
+    Lane(usize),
+    /// Agents the query hides: closed ones, and quiet ones under `active_only`.
+    Summary {
+        closed: usize,
+        quiet: usize,
+    },
+}
+
+/// What the selection follows: a lane or a group header.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RowKey {
+    Lane(u64),
+    Group(String),
+}
+
+impl Row {
+    pub fn key(&self, state: &State) -> Option<RowKey> {
+        match self {
+            Row::Group { key, .. } => Some(RowKey::Group(key.clone())),
+            Row::Lane(i) => Some(RowKey::Lane(state.lanes[*i].id)),
+            Row::Summary { .. } => None,
+        }
+    }
+}
+
+/// Index of `s` in `Row::Group` counts.
+pub fn count_slot(s: AgentStatus) -> usize {
+    match s {
+        AgentStatus::Blocked => 0,
+        AgentStatus::Working => 1,
+        AgentStatus::Done => 2,
+        AgentStatus::Idle => 3,
+        AgentStatus::Unknown => 4,
+    }
 }
 
 fn nonempty(s: &Option<String>) -> Option<String> {
@@ -491,20 +588,107 @@ impl State {
         lane.tab_id.as_ref().and_then(|t| self.tabs.get(t)).map(String::as_str).or(lane.tab_label.as_deref())
     }
 
-    /// Indices of agent lanes `q` shows, by workspace label, then open time, then pane id.
-    pub fn visible_lanes(&self, q: &Query) -> Vec<usize> {
-        let mut idx: Vec<usize> =
-            (0..self.lanes.len()).filter(|&i| self.lanes[i].visible() && (q.show_closed || self.lanes[i].is_open())).collect();
-        idx.sort_by(|&a, &b| {
-            let (la, lb) = (&self.lanes[a], &self.lanes[b]);
-            (self.workspace_of(la), la.opened_ms, &la.pane_id).cmp(&(self.workspace_of(lb), lb.opened_ms, &lb.pane_id))
-        });
-        idx
+    /// Group key and label of lane `i` under `group`.
+    pub fn group_of(&self, i: usize, group: Group) -> (String, String) {
+        let lane = &self.lanes[i];
+        match group {
+            Group::Workspace => (lane.workspace_id.clone(), self.workspace_label(i).to_string()),
+            Group::Tab => match &lane.tab_id {
+                Some(t) => (t.clone(), format!("{} · {}", self.workspace_label(i), self.tab_label(i).unwrap_or(t))),
+                None => (String::new(), "no tab".into()),
+            },
+            Group::None => (String::new(), String::new()),
+        }
     }
 
-    /// Closed agent lanes `q` hides.
-    pub fn closed_hidden(&self, q: &Query) -> usize {
-        if q.show_closed { 0 } else { self.lanes.iter().filter(|l| l.visible() && !l.is_open()).count() }
+    /// Rows for `q`: agent lanes filtered, grouped and sorted, group headers (all of them when
+    /// `headers`, else only folded ones), and a summary of what the filters hide. An open blocked
+    /// agent passes every filter and shows even inside a folded group.
+    pub fn rows(&self, q: &Query, now_ms: i64, quiet_after_ms: i64, headers: bool) -> Vec<Row> {
+        let search = q.search.to_lowercase();
+        let (mut closed, mut quiet) = (0, 0);
+        let mut passing = Vec::new();
+        for (i, lane) in self.lanes.iter().enumerate().filter(|(_, l)| l.visible()) {
+            if lane.is_open() && lane.status == AgentStatus::Blocked {
+                passing.push(i);
+                continue;
+            }
+            let in_scope = match q.scope {
+                Scope::All => true,
+                Scope::Workspace => self.focused_workspace.as_ref().is_none_or(|w| *w == lane.workspace_id),
+                Scope::Tab => self.focused_tab.as_ref().is_none_or(|t| Some(t) == lane.tab_id.as_ref()),
+            };
+            let found = search.is_empty()
+                || [Some(lane.label()), lane.task(), Some(self.workspace_label(i)), lane.cwd.as_deref()]
+                    .into_iter()
+                    .flatten()
+                    .any(|s| s.to_lowercase().contains(&search));
+            if !in_scope || !found {
+                continue;
+            }
+            if !lane.is_open() && !q.show_closed {
+                closed += 1;
+            } else if q.active_only
+                && lane.is_open()
+                && matches!(lane.status, AgentStatus::Idle | AgentStatus::Done | AgentStatus::Unknown)
+                && now_ms - lane.last_ms() >= quiet_after_ms
+            {
+                quiet += 1;
+            } else {
+                passing.push(i);
+            }
+        }
+
+        let rank = |i: usize| {
+            let l = &self.lanes[i];
+            if l.is_open() { count_slot(l.status) } else { 5 }
+        };
+        passing.sort_by(|&a, &b| {
+            let (la, lb) = (&self.lanes[a], &self.lanes[b]);
+            let stable =
+                (self.workspace_of(la), la.opened_ms, &la.pane_id).cmp(&(self.workspace_of(lb), lb.opened_ms, &lb.pane_id));
+            match q.sort {
+                Sort::Stable => stable,
+                Sort::Attention => (rank(a), if rank(a) == 0 { la.last_ms() } else { 0 })
+                    .cmp(&(rank(b), if rank(b) == 0 { lb.last_ms() } else { 0 }))
+                    .then(stable),
+                Sort::Recent => lb.last_ms().cmp(&la.last_ms()).then(stable),
+                Sort::Name => la.label().to_lowercase().cmp(&lb.label().to_lowercase()).then(stable),
+            }
+        });
+
+        // Groups in label order (blocked ones first under Attention), lanes in sort order within.
+        let mut groups: Vec<(String, String, Vec<usize>)> = Vec::new();
+        for i in passing {
+            let (key, label) = self.group_of(i, q.group);
+            match groups.iter_mut().find(|g| g.0 == key) {
+                Some(g) => g.2.push(i),
+                None => groups.push((key, label, vec![i])),
+            }
+        }
+        let blocked = |g: &(String, String, Vec<usize>)| g.2.iter().any(|&i| rank(i) == 0);
+        groups.sort_by(|a, b| {
+            let first = if q.sort == Sort::Attention { blocked(b).cmp(&blocked(a)) } else { std::cmp::Ordering::Equal };
+            first.then_with(|| a.1.cmp(&b.1))
+        });
+
+        let mut rows = Vec::new();
+        for (key, label, lanes) in groups {
+            let grouped = q.group != Group::None;
+            let collapsed = grouped && q.collapsed.contains(&key);
+            if grouped && (headers || collapsed) {
+                let mut counts = [0; 5];
+                for &i in lanes.iter().filter(|&&i| self.lanes[i].is_open()) {
+                    counts[count_slot(self.lanes[i].status)] += 1;
+                }
+                rows.push(Row::Group { key, label, counts, collapsed });
+            }
+            rows.extend(lanes.into_iter().filter(|&i| !collapsed || rank(i) == 0).map(Row::Lane));
+        }
+        if closed > 0 || quiet > 0 {
+            rows.push(Row::Summary { closed, quiet });
+        }
+        rows
     }
 
     /// Pane ids of open lanes seen live; the status subscription covers these.
@@ -708,6 +892,86 @@ mod tests {
         assert_eq!(status_time(l, 0, 1000), StatusTime { working_ms: 200, blocked_ms: 100, alive_ms: 400 });
         assert_eq!(status_time(l, 150, 350), StatusTime { working_ms: 150, blocked_ms: 50, alive_ms: 200 });
         assert_eq!(status_time(l, 500, 600), StatusTime::default(), "after close");
+    }
+
+    #[test]
+    fn blocked_notification_fires_once_per_episode() {
+        let mut s = four_lanes();
+        let mut sent = HashSet::new();
+        assert!(due_notifications(&s, 1000, 5000, &sent).is_empty(), "blocked for 899 ms only");
+        let due = due_notifications(&s, 6000, 5000, &sent);
+        assert_eq!(due.len(), 1);
+        sent.extend(due);
+        assert!(due_notifications(&s, 9000, 5000, &sent).is_empty(), "once per episode");
+        s.set_status(1, AgentStatus::Working, 9100);
+        s.set_status(1, AgentStatus::Blocked, 9200);
+        assert_eq!(due_notifications(&s, 20_000, 5000, &sent).len(), 1, "a new episode notifies again");
+    }
+
+    /// Lanes over workspaces `a` (idle p1, blocked p2) and `b` (working p3, closed p4).
+    fn four_lanes() -> State {
+        let workspaces = [("a".to_string(), "alpha".to_string()), ("b".to_string(), "beta".to_string())].into();
+        let mut s = State { workspaces, ..State::default() };
+        for (k, (ws, status)) in
+            [("a", AgentStatus::Idle), ("a", AgentStatus::Blocked), ("b", AgentStatus::Working), ("b", AgentStatus::Done)]
+                .into_iter()
+                .enumerate()
+        {
+            let i = s.open(&format!("{ws}:p{}", k + 1), ws, k as i64 * 10, Mark::Seen, AgentStatus::Unknown, true);
+            s.lanes[i].agent = Some("omp".into());
+            s.lanes[i].title = Some(format!("task{}", k + 1));
+            s.set_status(i, status, 100 + k as i64);
+        }
+        s.close("b:p4", Mark::Closed, 200);
+        s
+    }
+
+    #[test]
+    fn rows_filter_sort_and_group() {
+        let s = four_lanes();
+        let q = Query::default();
+        let rows = s.rows(&q, 1000, 500, true);
+        let group = |label: &str, counts: [usize; 5]| Row::Group {
+            key: label[..1].into(),
+            label: label.into(),
+            counts,
+            collapsed: false,
+        };
+        assert_eq!(
+            rows,
+            [
+                group("alpha", [1, 0, 0, 1, 0]),
+                Row::Lane(0),
+                Row::Lane(1),
+                group("beta", [0, 1, 0, 0, 0]),
+                Row::Lane(2),
+                Row::Summary { closed: 1, quiet: 0 }
+            ]
+        );
+
+        let q = Query { sort: Sort::Attention, group: Group::None, show_closed: true, ..Query::default() };
+        assert_eq!(s.rows(&q, 1000, 500, true), [Row::Lane(1), Row::Lane(2), Row::Lane(0), Row::Lane(3)]);
+
+        let q = Query { active_only: true, ..Query::default() };
+        let rows = s.rows(&q, 1000, 500, false);
+        assert_eq!(
+            rows,
+            [Row::Lane(1), Row::Lane(2), Row::Summary { closed: 1, quiet: 1 }],
+            "no headers, the idle lane is quiet"
+        );
+    }
+
+    #[test]
+    fn blocked_lanes_pass_every_filter() {
+        let s = four_lanes();
+        let mut q = Query { active_only: true, search: "nothing matches".into(), ..Query::default() };
+        assert_eq!(s.rows(&q, 1000, 0, false), [Row::Lane(1)], "only the blocked lane, and nothing counted as hidden");
+        q.search.clear();
+        q.collapsed.insert("a".into());
+        let rows = s.rows(&q, 1000, 0, true);
+        assert!(matches!(&rows[0], Row::Group { collapsed: true, .. }));
+        assert_eq!(rows[1], Row::Lane(1), "the blocked lane shows inside its folded group");
+        assert!(!rows.contains(&Row::Lane(0)));
     }
 
     #[test]

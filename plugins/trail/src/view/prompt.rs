@@ -10,6 +10,8 @@ use crate::theme::theme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptKind {
+    /// `/`: filters the lanes as you type.
+    Search,
     /// Timeline `; t`: the tool name `n` jumps to.
     JumpTool,
 }
@@ -17,6 +19,7 @@ pub enum PromptKind {
 impl PromptKind {
     fn label(self) -> &'static str {
         match self {
+            PromptKind::Search => "search",
             PromptKind::JumpTool => "jump to tool",
         }
     }

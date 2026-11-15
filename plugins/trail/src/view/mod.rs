@@ -1,6 +1,7 @@
 //! Shared frame (one header line over the body), view state, lane layout for both orientations
 //! and glyphs. Two modes: LANES (one lane per agent, through a status, heat or context lens, on a
-//! time or steps axis) and USAGE (an area chart of context per agent).
+//! time or steps axis) and USAGE (an area chart of context per agent). Lanes are filtered,
+//! grouped and sorted rows; the frame's size class decides how much each row carries.
 
 mod area;
 mod chrome;
@@ -11,12 +12,14 @@ mod help;
 mod inspect;
 mod keys;
 mod lanes;
+mod layout;
 mod prompt;
 mod sequence;
 mod time;
 mod timeline;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
+use std::time::Instant;
 
 use chrono::{Local, TimeZone};
 use ratatui::buffer::Buffer;
@@ -24,12 +27,14 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 
-use crate::config::config_problems;
-use crate::model::{AgentStatus, HISTORY_MS, Lane, Mark, Query, State};
+use crate::config::{config, config_problems};
+use crate::model::{AgentStatus, Group, HISTORY_MS, Lane, Mark, Query, Row, RowKey, Scope, Sort, State};
+use crate::session::index::StepRef;
 use crate::session::{Roots, Store, fmt_tokens};
 use crate::theme::{theme, theme_problems};
 use chrome::Seg;
-use gutter::{Cols, display_labels};
+use gutter::{Cols, display_labels, rollup};
+use layout::{SizeClass, size_class};
 
 pub const BUCKETS_S: [i64; 10] = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600];
 /// Rows a lane takes when drawn as a usage band; the line sits higher the more context is in use.
@@ -65,10 +70,10 @@ pub enum Axis {
     Steps,
 }
 
-/// Whether lanes grow into usage bands.
+/// Whether lanes grow into usage bands (or, in a sidebar, two rows).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Density {
-    /// Bands when every lane fits as one.
+    /// Bigger rows when every lane fits that way.
     Auto,
     Compact,
     Roomy,
@@ -98,6 +103,17 @@ pub enum Orient {
     Vertical,
 }
 
+/// Where a click lands.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Hit {
+    Row(RowKey),
+    ModeTab(Mode),
+    /// The blocked badge.
+    Badge,
+    /// A timeline list row.
+    Step(StepRef),
+}
+
 /// The `--view` names, as presets `1`-`5`.
 const PRESETS: [&str; 5] = ["time", "sequence", "area", "heat", "dash"];
 
@@ -123,17 +139,20 @@ pub struct App {
     pub view_end_ms: i64,
     /// Steps axis: steps hidden from the end of every lane.
     pub seq_back: usize,
-    /// Id of the selected lane; it stays selected however the rows reorder.
-    pub selected: Option<u64>,
-    /// Row of the last selection, used while the selected lane isn't shown.
+    /// The selected row's key; it stays selected however the rows reorder.
+    pub selected: Option<RowKey>,
+    /// Row of the last selection, used while the selected row isn't shown.
     sel_hint: usize,
     lane_scroll: usize,
-    /// Rows scrolled out above, drawn, and scrolled out below in the last render.
+    /// Lanes scrolled out above, drawn, and scrolled out below in the last render.
     shown: (usize, usize, usize),
     /// Largest context on screen when the last render drew usage bands.
     band_max: Option<u64>,
     /// Cells along the lane axis in the last render; scroll steps are a quarter of it.
     time_cells: usize,
+    /// The last frame's size class, and whether its group headers are rows.
+    class: SizeClass,
+    headers: bool,
     pub query: Query,
     pub now_ms: i64,
     started_ms: i64,
@@ -157,6 +176,10 @@ pub struct App {
     /// One-line text input over the body's last row.
     pub prompt: Option<prompt::Prompt>,
     pub surface: timeline::Surface,
+    /// Click targets from the last draw.
+    pub hits: Vec<(Rect, Hit)>,
+    /// The last left click, for double-clicks.
+    last_click: Option<(Hit, Instant)>,
 }
 
 impl App {
@@ -180,6 +203,8 @@ impl App {
             shown: (0, 0, 0),
             band_max: None,
             time_cells: 1,
+            class: SizeClass::Panel,
+            headers: true,
             query: Query::default(),
             now_ms,
             started_ms: now_ms,
@@ -196,6 +221,8 @@ impl App {
             inspector_shown: false,
             prompt: None,
             surface: timeline::Surface::Main,
+            hits: Vec::new(),
+            last_click: None,
         };
         app.preset(preset);
         app
@@ -253,29 +280,50 @@ impl App {
         self.bucket_idx = BUCKETS_S.iter().position(|&b| n as i64 * b * 1000 >= now - earliest).unwrap_or(BUCKETS_S.len() - 1);
     }
 
-    /// The lanes the views show, in row order.
-    fn rows(&self) -> Vec<usize> {
-        self.state.visible_lanes(&self.query)
+    /// The rows the views show, for the last frame's layout; a summary row comes last. Only LANES
+    /// rows group: columns and USAGE list every lane.
+    pub(crate) fn rows(&self) -> Vec<Row> {
+        if self.mode == Mode::Lanes && self.orient == Orient::Horizontal {
+            return self.state.rows(&self.query, self.now_ms, config().quiet_after_ms, self.headers);
+        }
+        let q = Query { group: Group::None, ..self.query.clone() };
+        self.state.rows(&q, self.now_ms, config().quiet_after_ms, self.headers)
     }
 
-    /// Highlighted row: the selected lane's, else the last selected row (clamped) while it's hidden.
-    pub(crate) fn sel_row(&self, rows: &[usize]) -> Option<usize> {
-        self.selected
-            .and_then(|id| self.state.lane_by_id(id))
-            .and_then(|li| rows.iter().position(|&i| i == li))
-            .or_else(|| (!rows.is_empty()).then(|| self.sel_hint.min(rows.len() - 1)))
+    /// Highlighted row: the selected key's, else the last selected row (clamped) while it's hidden;
+    /// before anything is selected, the first lane rather than a group header.
+    pub(crate) fn sel_row(&self, rows: &[Row]) -> Option<usize> {
+        let found = self.selected.as_ref().and_then(|k| rows.iter().position(|r| r.key(&self.state).as_ref() == Some(k)));
+        let selectable = rows.iter().filter(|r| !matches!(r, Row::Summary { .. })).count();
+        let first_lane = || rows.iter().position(|r| matches!(r, Row::Lane(_)));
+        let hint = || if self.selected.is_none() { first_lane() } else { None }.unwrap_or(self.sel_hint);
+        found.or_else(|| (selectable > 0).then(|| hint().min(selectable - 1)))
     }
 
-    fn select_row(&mut self, rows: &[usize], r: usize) {
-        let Some(&i) = rows.get(r) else { return };
-        self.selected = Some(self.state.lanes[i].id);
+    fn select_row(&mut self, rows: &[Row], r: usize) {
+        let Some(key) = rows.get(r).and_then(|row| row.key(&self.state)) else { return };
+        self.selected = Some(key);
         self.sel_hint = r;
     }
 
+    /// The highlighted lane, when the highlight is on a lane.
     fn selected_lane(&self) -> Option<usize> {
         let rows = self.rows();
-        self.sel_row(&rows).map(|r| rows[r])
+        match self.sel_row(&rows).map(|r| &rows[r]) {
+            Some(&Row::Lane(i)) => Some(i),
+            _ => None,
+        }
     }
+}
+
+/// Lane indices among `rows`, in order.
+fn lanes_of(rows: &[Row]) -> Vec<usize> {
+    rows.iter()
+        .filter_map(|r| match r {
+            Row::Lane(i) => Some(*i),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Shape of a status, so state reads without color.
@@ -374,7 +422,11 @@ fn row_height(app: &App, lane: &Lane, all_fit: bool) -> u16 {
         Density::Auto => all_fit,
         Density::Compact => false,
     } || app.expanded.contains(&lane.id);
-    let band = app.orient == Orient::Horizontal && app.lens == Lens::Status && wanted && app.sessions.has_usage(lane);
+    let band = app.orient == Orient::Horizontal
+        && app.class != SizeClass::Sidebar
+        && app.lens == Lens::Status
+        && wanted
+        && app.sessions.has_usage(lane);
     if band { BAND } else { 1 }
 }
 
@@ -442,6 +494,16 @@ pub fn put_str(buf: &mut Buffer, area: Rect, x: u16, y: u16, s: &str, style: Sty
     cx
 }
 
+/// Writes styled spans from (x, y), at most `max` cells, each over `base`; returns the x after.
+fn put_spans(buf: &mut Buffer, area: Rect, x: u16, y: u16, spans: &[Span], max: u16, base: Style) -> u16 {
+    let clip = Rect { x, width: max.min(area.right().saturating_sub(x)), ..area };
+    let mut cx = x;
+    for s in spans {
+        cx = put_str(buf, clip, cx, y, &s.content, base.patch(s.style));
+    }
+    cx
+}
+
 fn local(ms: i64, format: &str) -> String {
     Local.timestamp_millis_opt(ms).single().map_or_else(|| "--:--".into(), |t| t.format(format).to_string())
 }
@@ -495,7 +557,7 @@ fn fmt_short(ms: i64) -> String {
 }
 
 /// `42s`, `3m05s`, `2h07m`.
-fn fmt_dur(ms: i64) -> String {
+pub fn fmt_dur(ms: i64) -> String {
     let s = ms.max(0) / 1000;
     match s {
         0..60 => format!("{s}s"),
@@ -504,44 +566,60 @@ fn fmt_dur(ms: i64) -> String {
     }
 }
 
+/// One row of the grid: a lane (with how many rows it takes) or a group header.
+#[derive(Debug, Clone, Copy)]
+struct Item {
+    lane: Option<usize>,
+    height: u16,
+}
+
 /// Lane placement in the body. `lead` is what precedes the lanes across the lane axis: the time
-/// axis row (↔) or the axis gutter (↕). In ↔ each lane takes its row height, and a band is
-/// followed by a blank row; in ↕ every lane is a column `col_w` wide.
+/// axis row (↔) or the axis gutter (↕). In ↔ each row takes its height, a band is followed by a
+/// blank row, and a sidebar's two-row lanes put the strip under the gutter; in ↕ every lane is a
+/// column `col_w` wide.
 struct Grid {
     orient: Orient,
     body: Rect,
     lead: u16,
-    /// Rows each lane of `lanes` takes in ↔.
-    heights: Vec<u16>,
+    items: Vec<Item>,
     /// ↔ gutter columns.
     cols: Cols,
     /// ↕ column width.
     col_w: u16,
+    /// Sidebar lanes: gutter row, then the strip across the width.
+    two_row: bool,
 }
 
 impl Grid {
-    fn new(orient: Orient, body: Rect, lead: u16, heights: Vec<u16>) -> Grid {
-        let col_w = (body.width.saturating_sub(lead) / heights.len().max(1) as u16).clamp(6, 18);
-        Grid { orient, body, lead, heights, cols: Cols::fit(body.width), col_w }
+    fn new(orient: Orient, body: Rect, lead: u16, items: Vec<Item>, cols: Cols, two_row: bool) -> Grid {
+        let col_w = (body.width.saturating_sub(lead) / items.len().max(1) as u16).clamp(6, 18);
+        Grid { orient, body, lead, items, cols, col_w, two_row }
     }
 
     /// Cells along the time axis.
     fn n(&self) -> usize {
         match self.orient {
+            Orient::Horizontal if self.two_row => self.body.width.saturating_sub(2) as usize,
             Orient::Horizontal => self.cols.strip(self.body.width) as usize,
             Orient::Vertical => self.body.height.saturating_sub(1) as usize,
         }
     }
 
-    /// Cells lane `k` takes across the lanes, and what it is followed by.
+    /// First column of the strip (↔).
+    fn strip_x(&self) -> u16 {
+        self.body.x + if self.two_row { 2 } else { self.cols.left() }
+    }
+
+    /// Cells row `k` takes across the lanes, and what it is followed by.
     fn size(&self, k: usize) -> (u16, u16) {
+        let item = self.items[k];
         match self.orient {
-            Orient::Horizontal => (self.heights[k], u16::from(self.heights[k] > 1)),
+            Orient::Horizontal => (item.height, u16::from(item.height > 1 && !self.two_row)),
             Orient::Vertical => (self.col_w, 0),
         }
     }
 
-    /// Lanes from `scroll` that fit whole, with where each starts.
+    /// Rows from `scroll` that fit whole, with where each starts.
     fn placed(&self, scroll: usize) -> Vec<(usize, u16)> {
         let (origin, space) = match self.orient {
             Orient::Horizontal => (self.body.y + self.lead, self.body.height.saturating_sub(self.lead)),
@@ -549,7 +627,7 @@ impl Grid {
         };
         let mut at = 0;
         let mut out = Vec::new();
-        for k in scroll..self.heights.len() {
+        for k in scroll..self.items.len() {
             let (size, gap) = self.size(k);
             if at + size > space {
                 break;
@@ -581,7 +659,7 @@ impl Grid {
 
     fn cell_pos(&self, start: u16, band: u16, i: usize, level: u8) -> (u16, u16) {
         match self.orient {
-            Orient::Horizontal => (self.body.x + self.cols.left() + i as u16, start + (band - 1 - u16::from(level))),
+            Orient::Horizontal => (self.strip_x() + i as u16, start + u16::from(self.two_row) + (band - 1 - u16::from(level))),
             Orient::Vertical => (start + 2, self.body.y + 1 + i as u16),
         }
     }
@@ -589,7 +667,7 @@ impl Grid {
     /// Where the time-axis label for cell `i` starts.
     fn axis_pos(&self, i: usize) -> (u16, u16) {
         match self.orient {
-            Orient::Horizontal => (self.body.x + self.cols.left() + i as u16, self.body.y),
+            Orient::Horizontal => (self.strip_x() + i as u16, self.body.y),
             Orient::Vertical => (self.body.x, self.body.y + 1 + i as u16),
         }
     }
@@ -597,7 +675,7 @@ impl Grid {
     /// Where time-axis labels may draw: the strip's span (↔) or the axis gutter (↕).
     fn axis_area(&self) -> Rect {
         match self.orient {
-            Orient::Horizontal => Rect::new(self.body.x + self.cols.left(), self.body.y, self.n() as u16, 1),
+            Orient::Horizontal => Rect::new(self.strip_x(), self.body.y, self.n() as u16, 1),
             Orient::Vertical => Rect::new(self.body.x, self.body.y, self.lead, self.body.height),
         }
     }
@@ -608,27 +686,106 @@ impl Grid {
         }
     }
 
-    /// Draws each lane's gutter (↔) or column header (↕) and its cells from `pts(lane, store, n,
-    /// band)`, scrolling so the selected lane stays in view. Where the level changes between
-    /// cells, the line bends across the band in the new cell.
-    fn draw_lanes(&self, buf: &mut Buffer, app: &mut App, lanes: &[usize], pts: impl Fn(&Lane, &Store, usize, u16) -> Vec<Pt>) {
-        let sel = app.sel_row(lanes);
+    /// A group header row: `─ label ─────── ▲1 ●2 ─`, or `▸ label · n agents ▲1` when folded.
+    fn draw_group(&self, buf: &mut Buffer, y: u16, row: &Row, selected: bool) {
+        let Row::Group { label, counts, collapsed, .. } = row else { return };
+        let dim = Style::new().fg(theme().dim);
+        let base = if selected { Style::new().add_modifier(Modifier::REVERSED) } else { Style::new() };
+        let roll = rollup(counts);
+        let roll_w: u16 = roll.iter().map(|s| s.content.chars().count() as u16).sum();
+        let (x, w) = (self.body.x, self.body.width);
+        if *collapsed {
+            let n: usize = counts.iter().sum();
+            let at = put_str(buf, self.body, x, y, &format!("▸ {label} · {n} agents "), base.patch(dim));
+            put_spans(buf, self.body, at, y, &roll, w.saturating_sub(at - x), base);
+            return;
+        }
+        let head = format!("─ {label} ");
+        let at = put_str(buf, self.body, x, y, &truncate(&head, w.saturating_sub(roll_w + 4) as usize), base.patch(dim));
+        let fill_to = (x + w).saturating_sub(roll_w + 3);
+        let at = put_str(buf, self.body, at, y, &"─".repeat(fill_to.saturating_sub(at) as usize + 1), base.patch(dim));
+        let at = put_spans(buf, self.body, at, y, &roll, roll_w + 1, base);
+        put_str(buf, self.body, at, y, " ─", base.patch(dim));
+    }
+
+    /// Draws every placed row: group headers, and each lane's gutter (↔) or column header (↕)
+    /// with its cells from `pts(lane, store, n, band)`, scrolling so the selected row stays in
+    /// view. Where the level changes between cells, the line bends across the band in the new
+    /// cell. In a band the group column labels each group's first lane and rolls it up on the
+    /// second.
+    fn draw_lanes(&self, buf: &mut Buffer, app: &mut App, rows: &[Row], pts: impl Fn(&Lane, &Store, usize, u16) -> Vec<Pt>) {
+        let sel = app.sel_row(rows);
         app.lane_scroll = self.scroll_for(app.lane_scroll, sel.unwrap_or(0));
         let placed = self.placed(app.lane_scroll);
-        app.shown = (app.lane_scroll, placed.len(), lanes.len() - app.lane_scroll - placed.len());
-        let labels = display_labels(&app.state, lanes);
+        let lane_before = |k: usize| self.items[..k].iter().filter(|i| i.lane.is_some()).count();
+        let total = lane_before(self.items.len());
+        let above = lane_before(app.lane_scroll);
+        let shown = placed.iter().filter(|&&(k, _)| self.items[k].lane.is_some()).count();
+        app.shown = (above, shown, total - above - shown);
+
+        let lanes = lanes_of(rows);
+        let labels: HashMap<usize, String> = lanes.iter().copied().zip(display_labels(&app.state, &lanes)).collect();
+        // Band group column: each group's first lane names it, its second rolls it up.
+        let mut group_cell: HashMap<usize, Result<String, [usize; 5]>> = HashMap::new();
+        if self.cols.group_w > 0 {
+            let mut seen: HashMap<String, (usize, [usize; 5])> = HashMap::new();
+            for &li in &lanes {
+                let (key, _) = app.state.group_of(li, app.query.group);
+                let lane = &app.state.lanes[li];
+                let entry = seen.entry(key).or_insert((0, [0; 5]));
+                entry.0 += 1;
+                if lane.is_open() {
+                    entry.1[crate::model::count_slot(lane.status)] += 1;
+                }
+            }
+            let mut nth: HashMap<String, usize> = HashMap::new();
+            for &li in &lanes {
+                let (key, label) = app.state.group_of(li, app.query.group);
+                let k = nth.entry(key.clone()).or_default();
+                *k += 1;
+                match *k {
+                    1 => group_cell.insert(li, Ok(label)),
+                    2 => group_cell.insert(li, Err(seen[&key].1)),
+                    _ => None,
+                };
+            }
+        }
+
         let n = self.n();
         let dim = Style::new().fg(theme().dim);
         for (k, start) in placed {
-            let li = lanes[k];
-            let lane = &app.state.lanes[li];
             let selected = Some(k) == sel;
+            let (size, _) = self.size(k);
+            let rect = match self.orient {
+                Orient::Horizontal => Rect::new(self.body.x, start, self.body.width, size),
+                Orient::Vertical => Rect::new(start, self.body.y, size, self.body.height),
+            };
+            if let Some(key) = rows[k].key(&app.state) {
+                app.hits.push((rect, Hit::Row(key)));
+            }
+            let Row::Lane(li) = rows[k] else {
+                self.draw_group(buf, start, &rows[k], selected);
+                continue;
+            };
+            let lane = &app.state.lanes[li];
+            let label = labels.get(&li).map_or("", String::as_str);
             let band = match self.orient {
-                Orient::Horizontal => self.heights[k],
-                Orient::Vertical => 1,
+                Orient::Horizontal if !self.two_row => self.items[k].height,
+                _ => 1,
             };
             match self.orient {
-                Orient::Horizontal => gutter::draw_row(buf, self.body, &self.cols, app, li, &labels[k], start, band, selected),
+                Orient::Horizontal => {
+                    match group_cell.get(&li) {
+                        Some(Ok(name)) => {
+                            put_str(buf, self.body, self.body.x, start, &truncate(name, (self.cols.group_w - 1) as usize), dim);
+                        }
+                        Some(Err(counts)) => {
+                            put_spans(buf, self.body, self.body.x, start, &rollup(counts), self.cols.group_w - 1, Style::new());
+                        }
+                        None => {}
+                    }
+                    gutter::draw_row(buf, self.body, &self.cols, app, li, label, start, band, selected);
+                }
                 Orient::Vertical => {
                     let sel_style = if selected { Style::new().add_modifier(Modifier::REVERSED) } else { Style::new() };
                     let (glyph, gs) = if lane.is_open() {
@@ -644,7 +801,7 @@ impl Grid {
                         self.body,
                         start + 1,
                         self.body.y,
-                        &format!("{:<w$}", truncate(&labels[k], w)),
+                        &format!("{:<w$}", truncate(label, w)),
                         label_style.patch(sel_style),
                     );
                 }
@@ -723,14 +880,67 @@ fn lens_spans(app: &App) -> Vec<Span<'static>> {
     spans
 }
 
-/// Header segments, by priority: error, mode, counts, paused, selected, lens, problems, help.
-fn header(app: &App, lanes: &[usize]) -> Vec<Seg> {
+/// Non-default query settings for the header: `active · ws · sort recent · by tab · /omp`.
+fn query_text(q: &Query) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if q.active_only {
+        parts.push("active".into());
+    }
+    match q.scope {
+        Scope::All => {}
+        Scope::Workspace => parts.push("ws".into()),
+        Scope::Tab => parts.push("tab".into()),
+    }
+    match q.sort {
+        Sort::Stable => {}
+        Sort::Attention => parts.push("sort attention".into()),
+        Sort::Recent => parts.push("sort recent".into()),
+        Sort::Name => parts.push("sort name".into()),
+    }
+    match q.group {
+        Group::Workspace => {}
+        Group::Tab => parts.push("by tab".into()),
+        Group::None => parts.push("ungrouped".into()),
+    }
+    if !q.search.is_empty() {
+        parts.push(format!("/{}", q.search));
+    }
+    parts.join(" · ")
+}
+
+/// Open blocked agent lanes, oldest wait first, whatever the filters.
+fn blocked_lanes(app: &App) -> Vec<usize> {
+    let mut out: Vec<usize> = (0..app.state.lanes.len())
+        .filter(|&i| {
+            let l = &app.state.lanes[i];
+            l.visible() && l.is_open() && l.status == AgentStatus::Blocked
+        })
+        .collect();
+    out.sort_by_key(|&i| app.state.lanes[i].last_ms());
+    out
+}
+
+/// Header segments, by priority: error, blocked badge and mode, counts, paused, selected and
+/// query, lens, problems, help; with which segments are the badge and the mode tabs.
+fn header(app: &App, lanes: &[usize]) -> (Vec<Seg>, Option<usize>, usize) {
     let dim = Style::new().fg(theme().dim);
     let error = Style::new().fg(theme().error);
     let mut segs = Vec::new();
     if let Some(err) = &app.error {
         segs.push(Seg::left(0, vec![Span::styled(format!("⚠ herdr: {err} — retrying"), error)]));
     }
+    let blocked = blocked_lanes(app);
+    let badge = blocked.first().map(|&oldest| {
+        let age = fmt_dur(app.now_ms - app.state.lanes[oldest].last_ms());
+        segs.push(Seg::left(
+            1,
+            vec![Span::styled(
+                format!("▲ {} blocked {age}", blocked.len()),
+                Style::new().fg(theme().blocked).add_modifier(Modifier::BOLD),
+            )],
+        ));
+        segs.len() - 1
+    });
 
     let active = Style::new().fg(theme().accent).add_modifier(Modifier::BOLD);
     let tab = |name: &'static str, mode: Mode| {
@@ -741,6 +951,7 @@ fn header(app: &App, lanes: &[usize]) -> Vec<Seg> {
         modes.push(Span::raw(" ↕"));
     }
     segs.push(Seg::left(1, modes));
+    let modes = segs.len() - 1;
 
     let (above, shown, below) = app.shown;
     let mut counts = format!("{shown}/{}", lanes.len());
@@ -756,6 +967,10 @@ fn header(app: &App, lanes: &[usize]) -> Vec<Seg> {
         let paused =
             if app.steps() { format!("⏸ −{} · f", app.seq_back) } else { format!("⏸ {} · f", hms(app.view_end_ms)) };
         segs.push(Seg::left(3, vec![Span::styled(paused, Style::new().fg(theme().accent))]));
+    }
+    let query = query_text(&app.query);
+    if !query.is_empty() {
+        segs.push(Seg::left(4, vec![Span::styled(query, Style::new().fg(theme().accent))]));
     }
 
     segs.push(Seg::left(5, lens_spans(app)));
@@ -776,7 +991,7 @@ fn header(app: &App, lanes: &[usize]) -> Vec<Seg> {
         }
     }
 
-    if let Some(li) = app.sel_row(lanes).map(|r| lanes[r]) {
+    if let Some(li) = app.selected_lane() {
         let lane = &app.state.lanes[li];
         segs.push(Seg::right(
             4,
@@ -787,16 +1002,17 @@ fn header(app: &App, lanes: &[usize]) -> Vec<Seg> {
         ));
     }
     segs.push(Seg::right(7, vec![Span::styled("? keys", dim)]));
-    segs
+    (segs, badge, modes)
 }
 
 pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
     let [header_area, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
+    app.hits.clear();
     let in_timeline = matches!(app.surface, timeline::Surface::Timeline(_));
     if in_timeline {
         timeline::draw(buf, header_area, body, app);
     } else {
-        draw_main(buf, header_area, body, app);
+        draw_main(buf, area, header_area, body, app);
     }
     if let Some(p) = &app.prompt {
         prompt::draw(buf, body, p);
@@ -806,45 +1022,70 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
     }
 }
 
-fn draw_main(buf: &mut Buffer, header_area: Rect, body: Rect, app: &mut App) {
+fn draw_main(buf: &mut Buffer, area: Rect, header_area: Rect, body: Rect, app: &mut App) {
     let dim = Style::new().fg(theme().dim);
-    let lanes = app.rows();
+    app.class = size_class(area);
+    // A band keeps groups in a column beside the gutter; other shapes give them header rows.
+    app.headers = !(app.class == SizeClass::Band && app.query.group != Group::None && area.width >= 100);
     if !app.steps() && app.follow {
         app.view_end_ms = app.now_ms;
     }
     app.band_max = None;
+    let mut rows = app.rows();
+    let summary = match rows.last() {
+        Some(&Row::Summary { closed, quiet }) => {
+            rows.pop();
+            Some((closed, quiet))
+        }
+        _ => None,
+    };
+    let lanes = lanes_of(&rows);
     app.shown = (0, lanes.len(), 0);
-    let (body, inspector) = match inspect::place(app, body) {
+    let has_lane = app.selected_lane().is_some();
+    let (body, inspector) = match inspect::place(app, body, rows.len()).filter(|_| has_lane) {
         Some((main, side, bottom)) => (main, Some((side, bottom))),
         None => (body, None),
     };
     app.inspector_shown = inspector.is_some();
 
-    // Closed lanes fold into one summary row at the bottom (USAGE has no rows to fold).
-    let hidden = app.state.closed_hidden(&app.query);
-    let summary = hidden > 0 && app.mode == Mode::Lanes && body.height > 1;
-    let lane_body = if summary { Rect { height: body.height - 1, ..body } } else { body };
-    if lanes.is_empty() {
-        if hidden == 0 {
+    // What the filters hide folds into one summary row at the bottom (USAGE has no rows to fold).
+    let summary = summary.filter(|_| app.mode == Mode::Lanes && body.height > 1);
+    let lane_body = if summary.is_some() { Rect { height: body.height - 1, ..body } } else { body };
+    if rows.is_empty() {
+        if summary.is_none() {
             put_str(buf, body, body.x, body.y, "no agents yet — start one in a herdr pane", dim);
         }
     } else {
         match app.mode {
-            Mode::Lanes => lanes::render(buf, lane_body, app, &lanes),
+            Mode::Lanes => lanes::render(buf, lane_body, app, &rows),
             Mode::Usage => area::render(buf, lane_body, app, &lanes),
         }
     }
-    if summary {
-        let text = format!("▸ {hidden} closed in the last {}h — c shows them", HISTORY_MS / 3_600_000);
-        put_str(buf, body, body.x, body.bottom() - 1, &text, dim);
+    if let Some((closed, quiet)) = summary {
+        let mut parts = Vec::new();
+        if closed > 0 {
+            parts.push(format!("{closed} closed in the last {}h — c shows them", HISTORY_MS / 3_600_000));
+        }
+        if quiet > 0 {
+            parts.push(format!("{quiet} quiet — a shows them"));
+        }
+        put_str(buf, body, body.x, body.bottom() - 1, &format!("▸ {}", parts.join(" · ")), dim);
     }
     if let Some((area, bottom)) = inspector
-        && let Some(li) = app.sel_row(&lanes).map(|r| lanes[r])
+        && let Some(li) = app.selected_lane()
     {
         inspect::draw(buf, area, bottom, app, li);
     }
 
-    chrome::draw_header(buf, header_area, header(app, &lanes));
+    let (segs, badge, modes) = header(app, &lanes);
+    let rects = chrome::draw_header(buf, header_area, segs);
+    if let Some(r) = badge.and_then(|b| rects[b]) {
+        app.hits.push((r, Hit::Badge));
+    }
+    if let Some(r) = rects[modes] {
+        app.hits.push((Rect { width: 5, ..r }, Hit::ModeTab(Mode::Lanes)));
+        app.hits.push((Rect { x: r.x + 6, width: 5, ..r }, Hit::ModeTab(Mode::Usage)));
+    }
 }
 
 #[cfg(test)]
@@ -854,6 +1095,7 @@ pub(crate) mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     /// Lane opened at 0 (Created, idle), working at 2000, blocked at 5000; `now_ms = 8500`.
+    /// Ungrouped, so lane rows sit where the layout tests expect them.
     pub fn sample_app(preset: u8, orient: Orient) -> App {
         let mut state = State::default();
         let i = state.open("w1:p1", "w1", 0, Mark::Created, AgentStatus::Idle, true);
@@ -861,7 +1103,9 @@ pub(crate) mod tests {
         state.set_status(i, AgentStatus::Working, 2000);
         state.set_status(i, AgentStatus::Blocked, 5000);
         state.assign_slots();
-        App::new(state, preset, orient, 8500)
+        let mut app = App::new(state, preset, orient, 8500);
+        app.query.group = Group::None;
+        app
     }
 
     pub fn row(buf: &Buffer, y: u16, x0: u16, x1: u16) -> String {
@@ -910,12 +1154,13 @@ pub(crate) mod tests {
         let b = state.open("b:p1", "b", 0, Mark::Seen, AgentStatus::Idle, true);
         state.lanes[b].agent = Some("omp".into());
         let mut app = App::new(state, 1, Orient::Horizontal, 1000);
+        app.query.group = Group::None;
         let rows = app.rows();
         app.select_row(&rows, 0);
-        let id = app.selected;
+        let key = app.selected.clone();
         let a = app.state.open("a:p1", "a", 10, Mark::Seen, AgentStatus::Idle, true);
         app.state.lanes[a].agent = Some("omp".into());
-        assert_eq!(app.selected, id);
+        assert_eq!(app.selected, key);
         assert_eq!(sel(&app), Some(1), "the highlight follows the lane to its new row");
     }
 
@@ -930,10 +1175,11 @@ pub(crate) mod tests {
         }
         state.assign_slots();
         let mut app = App::new(state, 1, Orient::Horizontal, 8500);
-        let buf = render(&mut app, 60, 8);
+        app.query.group = Group::None;
+        let buf = render(&mut app, 80, 8);
         let glyphs: Vec<String> = (2..7).map(|y| buf[(1, y)].symbol().to_string()).collect();
         assert_eq!(glyphs, ["●", "▲", "✓", "○", "·"]);
-        assert!(row(&buf, 3, 33, 60).contains('╍'), "{}", row(&buf, 3, 33, 60));
+        assert!(row(&buf, 3, 33, 62).contains('╍'), "{}", row(&buf, 3, 33, 62));
     }
 
     #[test]
@@ -971,12 +1217,12 @@ pub(crate) mod tests {
     fn header_names_the_mode_and_lens() {
         let mut app = sample_app(1, Orient::Horizontal);
         let header = row(&render(&mut app, 120, 4), 0, 0, 120);
-        assert!(header.starts_with("LANES usage"), "{header}");
+        assert!(header.starts_with("▲ 1 blocked 3s │ LANES usage"), "{header}");
         assert!(header.contains("status · time · fit 1s"), "{header}");
         assert!(header.ends_with("? keys"), "{header}");
         press(&mut app, KeyCode::Tab);
         let header = row(&render(&mut app, 120, 4), 0, 0, 120);
-        assert!(header.starts_with("lanes USAGE") && header.contains("stacked"), "{header}");
+        assert!(header.contains("lanes USAGE") && header.contains("stacked"), "{header}");
     }
 
     #[test]
@@ -1016,6 +1262,68 @@ pub(crate) mod tests {
         assert!(row(&buf2, 3, 3, 30).starts_with("ctx 400"), "{}", row(&buf2, 3, 0, 100));
         assert_eq!(row(&buf2, 6, 0, 30), "", "a blank row follows the band");
         assert!(row(&buf2, 7, 0, 30).contains("omp"), "then the next lane");
+    }
+
+    /// Eight lanes over two workspaces; the last one blocked.
+    fn eight_lanes() -> App {
+        let mut app = sample_app(1, Orient::Horizontal);
+        app.state.set_status(0, AgentStatus::Idle, 6000);
+        for k in 2..=8 {
+            let i = add_lane(&mut app, &format!("w1:p{k}"), if k == 8 { AgentStatus::Blocked } else { AgentStatus::Idle });
+            app.state.lanes[i].opened_ms = k as i64 * 10;
+        }
+        app
+    }
+
+    #[test]
+    fn sticky_line_when_blocked_is_scrolled_out() {
+        let mut app = eight_lanes();
+        let buf = render(&mut app, 100, 6);
+        let first = row(&buf, 1, 0, 100);
+        assert!(first.starts_with("▲ omp"), "{first}");
+        assert!(first.contains("blocked 8s · b"), "{first}");
+        key(&mut app, 'b');
+        let buf = render(&mut app, 100, 6);
+        assert!(!row(&buf, 1, 0, 100).starts_with('▲'), "the blocked lane is in view now");
+    }
+
+    #[test]
+    fn b_selects_the_next_blocked_lane() {
+        let mut app = eight_lanes();
+        app.state.set_status(2, AgentStatus::Blocked, 300);
+        render(&mut app, 100, 14);
+        key(&mut app, 'b');
+        assert_eq!(app.selected_lane(), Some(2));
+        key(&mut app, 'b');
+        assert_eq!(app.selected_lane(), Some(7));
+        key(&mut app, 'b');
+        assert_eq!(app.selected_lane(), Some(2), "wraps");
+    }
+
+    #[test]
+    fn sidebar_rows_keep_state_and_ctx() {
+        let mut app = two_lanes(Orient::Horizontal);
+        let id = app.state.lanes[1].id;
+        app.sessions.insert_samples(id, &[(150, 52_000, None)]);
+        app.query.group = Group::Workspace;
+        let buf = render(&mut app, 50, 20);
+        assert!(row(&buf, 2, 0, 50).starts_with("─ w1 "), "{}", row(&buf, 2, 0, 50));
+        // Two rows per lane: the gutter, then the strip under it.
+        let first = row(&buf, 3, 0, 50);
+        assert!(first.contains("blocked 3s") && first.ends_with('–'), "{first}");
+        assert!(row(&buf, 4, 2, 50).ends_with('▸'), "{}", row(&buf, 4, 0, 50));
+        let second = row(&buf, 5, 0, 50);
+        assert!(second.contains("idle 8s") && second.ends_with("52k"), "{second}");
+    }
+
+    #[test]
+    fn band_groups_sit_in_a_column() {
+        let mut app = two_lanes(Orient::Horizontal);
+        app.query.group = Group::Workspace;
+        let buf = render(&mut app, 120, 6);
+        assert!(row(&buf, 2, 0, 10).starts_with("w1"), "{}", row(&buf, 2, 0, 120));
+        assert!(row(&buf, 3, 0, 10).starts_with("▲1 ○1"), "{}", row(&buf, 3, 0, 120));
+        assert_eq!(buf[(11, 2)].symbol(), "▲", "the gutter starts after the group column");
     }
 
     #[test]

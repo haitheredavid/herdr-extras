@@ -15,7 +15,7 @@ use ratatui::text::Span;
 use super::chrome::{Seg, draw_header};
 use super::gutter::fmt_cost;
 use super::prompt::{Prompt, PromptKind};
-use super::{App, Orient, fmt_dur, fmt_short, hm, hms, put_str, status_glyph, truncate};
+use super::{App, Hit, Orient, fmt_dur, fmt_short, hm, hms, put_str, status_glyph, truncate};
 use crate::model::{AgentStatus, Lane};
 use crate::session::index::{StepIndex, StepRef, StepRow, end_of};
 use crate::session::text::{TextLevel, intent_text, prompt_text};
@@ -509,6 +509,20 @@ fn back(tl: &mut TimelineState, v: &View) {
     }
 }
 
+/// A click on a list row: the cursor goes there; a double-click opens it as Enter would.
+pub(super) fn click(app: &mut App, r: StepRef, double: bool) {
+    let Surface::Timeline(mut tl) = std::mem::replace(&mut app.surface, Surface::Main) else { return };
+    if let Some(v) = view(app, &tl)
+        && let Some(k) = tl.frame().index.position(r)
+    {
+        tl.goto(k, &v);
+    }
+    app.surface = Surface::Timeline(tl);
+    if double {
+        on_key(app, KeyEvent::new(KeyCode::Enter, ratatui::crossterm::event::KeyModifiers::NONE));
+    }
+}
+
 /// A prompt's accepted text, for the timeline.
 pub(super) fn accept_tool(app: &mut App, name: String) {
     if let Surface::Timeline(tl) = &mut app.surface {
@@ -885,12 +899,14 @@ fn row_text(v: &View, tl: &TimelineState, row: &StepRow) -> (String, Style) {
     }
 }
 
-fn draw_list(buf: &mut Buffer, area: Rect, tl: &mut TimelineState, v: &View) {
+/// Draws the visible rows around the cursor; returns each drawn step's row rect.
+fn draw_list(buf: &mut Buffer, area: Rect, tl: &mut TimelineState, v: &View) -> Vec<(Rect, StepRef)> {
     let dim = Style::new().fg(theme().dim);
     let f = tl.frame();
+    let mut hits = Vec::new();
     if f.index.rows.is_empty() {
         put_str(buf, area, area.x + 2, area.y, "no steps yet", dim);
-        return;
+        return hits;
     }
     let vis = f.visible(v.session);
     let gap = tl.encoding == Encoding::Gap;
@@ -931,6 +947,7 @@ fn draw_list(buf: &mut Buffer, area: Rect, tl: &mut TimelineState, v: &View) {
                 let (text, style) = row_text(v, tl, row);
                 let indent = "  ".repeat(row.depth as usize);
                 let selected = Some(k) == cursor;
+                hits.push((Rect { y, height: 1, ..area }, row.r));
                 let line = format!("{} {indent}{text}", if selected { '▸' } else { ' ' });
                 let style = if selected { style.add_modifier(Modifier::REVERSED) } else { style };
                 put_str(buf, area, area.x, y, &truncate(&line, area.width as usize), style);
@@ -938,6 +955,7 @@ fn draw_list(buf: &mut Buffer, area: Rect, tl: &mut TimelineState, v: &View) {
         }
     }
     tl.frame_mut().top = top;
+    hits
 }
 
 /// Lines describing the step under the cursor.
@@ -1130,12 +1148,13 @@ pub(super) fn draw(buf: &mut Buffer, header_area: Rect, body: Rect, app: &mut Ap
         }
     };
     draw_scrubber(buf, scrub, narrow, &mut tl, &v);
-    draw_list(buf, list, &mut tl, &v);
+    let hits = draw_list(buf, list, &mut tl, &v);
     if let Some((area, beside)) = inspector {
         draw_inspector(buf, area, beside, &tl, &v);
     }
     draw_header(buf, header_area, header(&tl, &v, header_area.width));
     app.surface = Surface::Timeline(tl);
+    app.hits.extend(hits.into_iter().map(|(r, s)| (r, Hit::Step(s))));
 }
 
 #[cfg(test)]

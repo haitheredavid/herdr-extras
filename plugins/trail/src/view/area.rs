@@ -360,10 +360,10 @@ pub fn render(buf: &mut Buffer, body: Rect, app: &mut App, lanes: &[usize]) {
     }
 
     // End labels: beside each line's last point (↔), or one row each under the chart (↕).
-    let sel = app.sel_row(lanes);
+    let sel = app.selected_lane();
     let label_style = |k: usize, slot: usize| {
         let s = Style::new().fg(theme().agent_color(slot));
-        if Some(k) == sel { s.add_modifier(Modifier::UNDERLINED | Modifier::BOLD) } else { s }
+        if sel == Some(lanes[k]) { s.add_modifier(Modifier::UNDERLINED | Modifier::BOLD) } else { s }
     };
     let last_t = (0..t_dots).rev().find(|&t| bands.iter().any(|b| b[t].is_some()));
     let mut ends: Vec<(u16, usize, usize, u64)> = last_t
