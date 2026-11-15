@@ -122,9 +122,18 @@ fn parse_opts(args: &[String]) -> anyhow::Result<Opts> {
     Ok(o)
 }
 
+/// What `--version` prints; the install script checks downloads against it.
+fn version_line() -> String {
+    format!("herdr-trail {}", env!("CARGO_PKG_VERSION"))
+}
+
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
+        Some("--version") => {
+            println!("{}", version_line());
+            Ok(())
+        }
         Some(cmd @ ("open" | "record" | "follow")) => {
             let result = match cmd {
                 "open" => open::run(&args[1..]),
@@ -413,5 +422,11 @@ mod tests {
         assert!(parse_opts(&args("--width 50")).is_err());
         assert!(parse_opts(&args("--popup --height 10")).is_err());
         assert!(parse_opts(&args("--dump --width wide")).is_err());
+    }
+
+    #[test]
+    fn version_flag_prints_name_and_version() {
+        assert_eq!(version_line(), format!("herdr-trail {}", env!("CARGO_PKG_VERSION")));
+        assert!(version_line().starts_with("herdr-trail 0."));
     }
 }

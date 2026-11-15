@@ -5,14 +5,20 @@ min_herdr_version = "0.9.5"
 description = "Agent activity timeline for herdr: state, context and cost per agent, and a step-through session timeline"
 platforms = ["macos", "linux"]
 
+# The plugin is a Rust binary at bin/herdr-trail. On install (updating is
+# reinstalling), Herdr runs this step in the plugin directory: it downloads the
+# release binary for this version and platform, checks it against the
+# release's SHA256SUMS, and falls back to `cargo build --release` (Rust 1.88+).
+# Herdr resolves a command path with a separator from the plugin directory.
+# `herdr plugin link` runs no build step: run `sh scripts/install.sh` yourself.
 [[build]]
-command = ["cargo", "build", "--release", "--locked", "--target-dir", "target"]
+command = ["sh", "scripts/install.sh"]
 
 [[panes]]
 id = "trail"
 title = "Trail"
 placement = "split"
-command = ["target/release/herdr-trail"]
+command = ["bin/herdr-trail"]
 
 [[panes]]
 id = "trail-popup"
@@ -20,48 +26,48 @@ title = "Trail"
 placement = "popup"
 width = "80%"
 height = "80%"
-command = ["target/release/herdr-trail", "--popup"]
+command = ["bin/herdr-trail", "--popup"]
 
 [[actions]]
 id = "open"
 title = "Agent trail (band)"
-command = ["target/release/herdr-trail", "open", "split"]
+command = ["bin/herdr-trail", "open", "split"]
 
 [[actions]]
 id = "open-popup"
 title = "Agent trail (popup)"
-command = ["target/release/herdr-trail", "open", "popup"]
+command = ["bin/herdr-trail", "open", "popup"]
 
 # Recorder: every agent lifecycle event appends to the history log the panel loads on open.
 [[events]]
 on = "pane.created"
-command = ["target/release/herdr-trail", "record"]
+command = ["bin/herdr-trail", "record"]
 
 [[events]]
 on = "pane.agent_detected"
-command = ["target/release/herdr-trail", "record"]
+command = ["bin/herdr-trail", "record"]
 
 [[events]]
 on = "pane.agent_status_changed"
-command = ["target/release/herdr-trail", "record"]
+command = ["bin/herdr-trail", "record"]
 
 [[events]]
 on = "pane.closed"
-command = ["target/release/herdr-trail", "record"]
+command = ["bin/herdr-trail", "record"]
 
 [[events]]
 on = "pane.exited"
-command = ["target/release/herdr-trail", "record"]
+command = ["bin/herdr-trail", "record"]
 
 [[events]]
 on = "pane.moved"
-command = ["target/release/herdr-trail", "record"]
+command = ["bin/herdr-trail", "record"]
 
 # Pin: the band follows focus into whichever workspace/tab you switch to.
 [[events]]
 on = "workspace.focused"
-command = ["target/release/herdr-trail", "follow"]
+command = ["bin/herdr-trail", "follow"]
 
 [[events]]
 on = "tab.focused"
-command = ["target/release/herdr-trail", "follow"]
+command = ["bin/herdr-trail", "follow"]
