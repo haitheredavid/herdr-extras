@@ -99,17 +99,24 @@ struct Tokens {
 }
 
 impl Codex {
+    /// `task_started` lands a few ms before the prompt; the turn's first request starts at the prompt, so
+    /// it sorts under its turn.
+    fn prompt(&mut self, ts: i64, chars: u32, src: SourceRef, out: &mut Vec<Fact>) {
+        self.last_ts = self.last_ts.max(ts);
+        out.push(Fact::Prompt { at_ms: ts, trigger: Trigger::User, chars, src });
+    }
+
     fn event(&mut self, p: Payload, ts: i64, src: SourceRef, out: &mut Vec<Fact>) {
         match p.ty.as_str() {
             "task_started" => self.last_ts = ts,
             "user_message" => {
                 let chars = p.message.as_deref().map_or(0, |m| m.chars().count()) as u32;
-                out.push(Fact::Prompt { at_ms: ts, trigger: Trigger::User, chars, src });
+                self.prompt(ts, chars, src, out);
             }
             "item_completed" => {
                 let Some(item) = p.item.filter(|i| i.ty == "UserMessage") else { return };
                 let chars = item.content.iter().filter_map(|t| t.text.as_deref()).map(|t| t.chars().count()).sum::<usize>();
-                out.push(Fact::Prompt { at_ms: ts, trigger: Trigger::User, chars: chars as u32, src });
+                self.prompt(ts, chars as u32, src, out);
             }
             "token_count" => {
                 let Some(info) = p.info else { return };
@@ -241,7 +248,7 @@ mod tests {
         assert_eq!((r.usage.input, r.usage.cache_read, r.usage.reasoning), (1118, 12000, 34));
         assert_eq!(r.ctx_window, Some(258400));
         assert_eq!(r.model, "gpt-5.5-codex");
-        assert_eq!(r.started_ms, rfc3339_ms("2026-11-12T03:44:38Z").unwrap(), "from the turn start");
+        assert_eq!(r.started_ms, rfc3339_ms("2026-11-12T03:44:38.100Z").unwrap(), "from the prompt, not task_started");
         assert_eq!(s.spans.len(), 1);
         assert_eq!((s.spans[0].kind, s.spans[0].status), (SpanKind::Tool(ToolCat::Shell), SpanStatus::Ok));
         assert_eq!(s.turns.len(), 1);
