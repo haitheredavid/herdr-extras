@@ -11,7 +11,8 @@ use ratatui::text::Span;
 
 use super::layout::SizeClass;
 use super::{App, fmt_dur, hm, put_str, status_glyph, truncate};
-use crate::model::{AgentStatus, HISTORY_MS, State, status_time};
+use crate::config::history_ms;
+use crate::model::{AgentStatus, State, status_time};
 use crate::session::fmt_tokens;
 use crate::theme::theme;
 
@@ -155,7 +156,7 @@ pub(super) fn draw_row(
         put_str(buf, body, x + 4 + cols.name_w, y, &format!("{:<state_w$}", truncate(&state, state_w)), style.patch(sel));
     }
 
-    let from = now - HISTORY_MS;
+    let from = now - history_ms();
     let spend = app.sessions.spend_between(lane, from, now);
     let cost = spend.cost;
     let mut rx = body.right().saturating_sub(cols.right());

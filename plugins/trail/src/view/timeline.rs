@@ -477,11 +477,13 @@ fn handle(tl: &mut TimelineState, app: &mut App, key: KeyEvent) -> bool {
             }
         }
         KeyCode::Char('T') => {
-            tl.text = match tl.text {
+            let next = match tl.text {
                 TextLevel::None => TextLevel::Intent,
                 TextLevel::Intent => TextLevel::Prompt,
                 TextLevel::Prompt => TextLevel::None,
-            }
+            };
+            // `[privacy] max_text` caps what the timeline may read back.
+            tl.text = if next > crate::config::config().max_text { TextLevel::None } else { next };
         }
         KeyCode::Esc => {
             if tl.stack.len() == 1 {

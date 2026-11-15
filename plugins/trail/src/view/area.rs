@@ -10,7 +10,8 @@ use ratatui::style::{Color, Modifier, Style};
 
 use super::time::start_ms;
 use super::{App, AreaMode, Orient, put_str, time_ticks, truncate};
-use crate::model::{HISTORY_MS, Lane};
+use crate::config::history_ms;
+use crate::model::Lane;
 use crate::session::{Store, fmt_tokens};
 use crate::theme::{mix, theme};
 
@@ -145,7 +146,7 @@ impl Plot {
 }
 
 /// First ms the chart covers, and ms per time dot. Fitting while following stretches the history
-/// (capped at `HISTORY_MS`) across the whole time axis; otherwise LANES' buckets apply.
+/// (capped at the history window) across the whole time axis; otherwise LANES' buckets apply.
 fn time_frame(app: &App, lanes: &[usize], t_dots: usize, dots_per_cell: usize) -> (i64, i64) {
     let now = app.now_ms;
     if app.bucket_auto && app.follow {
@@ -157,7 +158,7 @@ fn time_frame(app: &App, lanes: &[usize], t_dots: usize, dots_per_cell: usize) -
             })
             .min()
             .unwrap_or(now)
-            .max(now - HISTORY_MS);
+            .max(now - history_ms());
         let dot_ms = ((now - earliest) / t_dots.max(1) as i64 + 1).max(1000);
         return (earliest, dot_ms);
     }

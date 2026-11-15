@@ -27,8 +27,8 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 
-use crate::config::{config, config_problems};
-use crate::model::{AgentStatus, Group, HISTORY_MS, Lane, Mark, Query, Row, RowKey, Scope, Sort, State};
+use crate::config::{config, config_problems, history_ms};
+use crate::model::{AgentStatus, Group, Lane, Mark, Query, Row, RowKey, Scope, Sort, State};
 use crate::session::index::StepRef;
 use crate::session::{Roots, Store, fmt_tokens};
 use crate::theme::{theme, theme_problems};
@@ -157,6 +157,8 @@ pub struct App {
     pub now_ms: i64,
     started_ms: i64,
     pub error: Option<String>,
+    /// A transient header message, and when it expires (ms).
+    pub notice: Option<(String, i64)>,
     /// Last snapshot succeeded, so lanes reflect the live panes.
     pub connected: bool,
     /// Running as a popup: Esc closes, and jumping to an agent closes too.
@@ -209,6 +211,7 @@ impl App {
             now_ms,
             started_ms: now_ms,
             error: None,
+            notice: None,
             connected: false,
             popup: false,
             help: false,
@@ -252,7 +255,7 @@ impl App {
     /// first-seen lanes to when their session shows the agent started.
     pub fn refresh_usage(&mut self) {
         self.sessions.refresh(&self.state.lanes, self.now_ms);
-        let since = self.now_ms - HISTORY_MS;
+        let since = self.now_ms - history_ms();
         let early: Vec<(usize, i64)> = (0..self.state.lanes.len())
             .filter_map(|i| {
                 let lane = &self.state.lanes[i];
@@ -270,13 +273,13 @@ impl App {
     }
 
     /// While following with the auto bucket, the smallest bucket whose `n` cells reach back to the
-    /// earliest lane (at most `HISTORY_MS`), so the strip holds the history and no empty future.
+    /// earliest lane (at most the history window), so the strip holds the history and no empty future.
     fn fit_bucket(&mut self, lanes: &[usize], n: usize) {
         if !(self.bucket_auto && self.follow) || n == 0 {
             return;
         }
         let now = self.now_ms;
-        let earliest = lanes.iter().map(|&i| self.state.lanes[i].opened_ms).min().unwrap_or(now).max(now - HISTORY_MS);
+        let earliest = lanes.iter().map(|&i| self.state.lanes[i].opened_ms).min().unwrap_or(now).max(now - history_ms());
         self.bucket_idx = BUCKETS_S.iter().position(|&b| n as i64 * b * 1000 >= now - earliest).unwrap_or(BUCKETS_S.len() - 1);
     }
 
@@ -546,12 +549,13 @@ fn fmt_bucket(s: i64) -> String {
     if s >= 60 { format!("{}m", s / 60) } else { format!("{s}s") }
 }
 
-/// `42s`, `3m`, `2h07`: a short span, for gaps and windows.
+/// `42s`, `3m`, `2h`, `2h07`: a short span, for gaps and windows.
 fn fmt_short(ms: i64) -> String {
     let s = ms.max(0) / 1000;
     match s {
         0..60 => format!("{s}s"),
         60..3600 => format!("{}m", s / 60),
+        _ if s % 3600 < 60 => format!("{}h", s / 3600),
         _ => format!("{}h{:02}", s / 3600, s % 3600 / 60),
     }
 }
@@ -929,6 +933,9 @@ fn header(app: &App, lanes: &[usize]) -> (Vec<Seg>, Option<usize>, usize) {
     if let Some(err) = &app.error {
         segs.push(Seg::left(0, vec![Span::styled(format!("⚠ herdr: {err} — retrying"), error)]));
     }
+    if let Some((text, _)) = app.notice.as_ref().filter(|(_, until)| app.now_ms < *until) {
+        segs.push(Seg::left(0, vec![Span::styled(text.clone(), Style::new().fg(theme().accent))]));
+    }
     let blocked = blocked_lanes(app);
     let badge = blocked.first().map(|&oldest| {
         let age = fmt_dur(app.now_ms - app.state.lanes[oldest].last_ms());
@@ -989,6 +996,12 @@ fn header(app: &App, lanes: &[usize]) -> (Vec<Seg>, Option<usize>, usize) {
         if !spans.is_empty() {
             segs.push(Seg::left(6, spans));
         }
+    }
+    if let Some(n) = app.state.protocol.filter(|&n| n > crate::herdr::KNOWN_PROTOCOL) {
+        segs.push(Seg::left(
+            6,
+            vec![Span::styled(format!("herdr protocol {n} untested (built for {})", crate::herdr::KNOWN_PROTOCOL), error)],
+        ));
     }
 
     if let Some(li) = app.selected_lane() {
@@ -1064,7 +1077,7 @@ fn draw_main(buf: &mut Buffer, area: Rect, header_area: Rect, body: Rect, app: &
     if let Some((closed, quiet)) = summary {
         let mut parts = Vec::new();
         if closed > 0 {
-            parts.push(format!("{closed} closed in the last {}h — c shows them", HISTORY_MS / 3_600_000));
+            parts.push(format!("{closed} closed in the last {} — c shows them", fmt_short(history_ms())));
         }
         if quiet > 0 {
             parts.push(format!("{quiet} quiet — a shows them"));

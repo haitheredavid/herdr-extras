@@ -7,12 +7,14 @@ use std::path::PathBuf;
 use anyhow::{Context, anyhow};
 use serde_json::{Value, json};
 
+use crate::config::config;
 use crate::herdr::request;
-use crate::history::log_dir;
-use crate::open::{BAND_ROWS, shorten};
+use crate::history::{log_dir, session_name};
+use crate::open::{band_size, shorten};
 
+/// One pin per herdr session: each session's band follows focus on its own.
 fn pin_file() -> PathBuf {
-    log_dir().join("pinned")
+    log_dir().join(format!("pinned-{}", session_name()))
 }
 
 /// Pins the band in `pane`, a pane object as herdr reports it.
@@ -31,6 +33,9 @@ pub fn pin(pane: &Value) -> anyhow::Result<()> {
 }
 
 pub fn run() -> anyhow::Result<()> {
+    if !config().band_follow {
+        return Ok(());
+    }
     let Ok(terminal) = std::fs::read_to_string(pin_file()) else { return Ok(()) };
     let payload: Value =
         std::env::var("HERDR_PLUGIN_EVENT_JSON").ok().and_then(|raw| serde_json::from_str(&raw).ok()).unwrap_or(Value::Null);
@@ -60,12 +65,13 @@ pub fn run() -> anyhow::Result<()> {
         "pane.move",
         json!({
             "pane_id": band_id,
-            "destination": { "type": "tab", "tab_id": tab_id, "split": "down" },
+            "destination": { "type": "tab", "tab_id": tab_id, "split": config().band_split.name() },
             "focus": false,
         }),
     )?;
     let new_id = moved["move_result"]["pane"]["pane_id"].as_str().ok_or_else(|| anyhow!("pane.move: no pane id in response"))?;
-    shorten(new_id, BAND_ROWS)
+    let (cells, axis) = band_size();
+    shorten(new_id, cells, axis)
 }
 
 /// Move unless the band is already in the focused tab, or is alone in its tab (moving it would

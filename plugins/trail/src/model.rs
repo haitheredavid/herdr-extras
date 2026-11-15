@@ -5,11 +5,9 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::history_ms;
 use crate::herdr::Snapshot;
 use crate::session::SessionRef;
-
-/// Log window loaded at start; closed lanes older than this are pruned.
-pub const HISTORY_MS: i64 = 2 * 3600 * 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -554,7 +552,7 @@ impl State {
         for (id, at) in gone {
             self.close(&id, Mark::Closed, at);
         }
-        self.lanes.retain(|l| l.closed_ms.is_none_or(|c| c >= now_ms - HISTORY_MS));
+        self.lanes.retain(|l| l.closed_ms.is_none_or(|c| c >= now_ms - history_ms()));
         self.assign_slots();
     }
 
@@ -804,13 +802,31 @@ mod tests {
     }
 
     #[test]
+    fn fixture_snapshot_folds_into_pane_lanes() {
+        let snap: Snapshot = serde_json::from_str(include_str!("../tests/fixtures/snapshot.json")).unwrap();
+        let mut s = State::default();
+        s.apply_snapshot(&snap, 1000);
+        let panes: Vec<(&str, Option<&str>)> = snap.panes.iter().map(|p| (p.pane_id.as_str(), p.agent.as_deref())).collect();
+        let open: Vec<(&str, Option<&str>)> =
+            s.lanes.iter().filter(|l| l.is_open()).map(|l| (l.pane_id.as_str(), l.agent.as_deref())).collect();
+        assert_eq!(open, panes);
+        let omp: Vec<&Lane> = s.lanes.iter().filter(|l| l.agent.as_deref() == Some("omp")).collect();
+        assert!(!omp.is_empty());
+        for lane in omp {
+            assert_eq!(lane.sessions.len(), 1, "{}", lane.pane_id);
+            assert_eq!(lane.sessions[0].kind, RefKind::Path);
+        }
+        assert_eq!(s.protocol, Some(22));
+    }
+
+    #[test]
     fn snapshot_closes_live_lane_now_and_prunes_old() {
         let mut s = State::default();
         let i = s.open("p1", "w1", 0, Mark::Seen, AgentStatus::Idle, true);
         s.lanes[i].agent = Some("omp".into());
         s.apply_snapshot(&Snapshot::default(), 500);
         assert_eq!(s.lanes[0].closed_ms, Some(500));
-        s.apply_snapshot(&Snapshot::default(), 500 + HISTORY_MS + 1);
+        s.apply_snapshot(&Snapshot::default(), 500 + history_ms() + 1);
         assert!(s.lanes.is_empty());
     }
 
@@ -874,9 +890,9 @@ mod tests {
         fold(&mut s, &log(10, "pane.closed", "p1", None));
         let pane = |id: &str| json!({"pane_id": id, "workspace_id": "w1", "agent": "omp", "agent_status": "idle"});
         let snap: Snapshot = serde_json::from_value(json!({"panes": [pane("p2"), pane("p3")]})).unwrap();
-        s.apply_snapshot(&snap, 10 + HISTORY_MS + 1);
+        s.apply_snapshot(&snap, 10 + history_ms() + 1);
         assert_eq!(s.lanes.len(), 2, "p1 pruned");
-        fold(&mut s, &log(20 + HISTORY_MS, "pane.created", "p4", Some(AgentStatus::Idle)));
+        fold(&mut s, &log(20 + history_ms(), "pane.created", "p4", Some(AgentStatus::Idle)));
         let slots: Vec<_> = s.lanes.iter().map(|l| (l.pane_id.as_str(), l.slot)).collect();
         assert_eq!(slots, [("p2", Some(1)), ("p3", Some(2)), ("p4", Some(3))]);
     }

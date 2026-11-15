@@ -23,14 +23,17 @@ use ratatui::crossterm::execute;
 use ratatui::layout::Rect;
 use serde_json::json;
 
-use config::config;
+use config::{config, history_ms};
 use herdr::{Msg, Subscriber};
-use model::{HISTORY_MS, State, due_notifications};
+use model::{State, due_notifications};
 use view::{App, Orient, fmt_dur, preset_from_name};
 
 const SNAPSHOT_EVERY: Duration = Duration::from_secs(5);
 const RETRY_EVERY: Duration = Duration::from_secs(2);
-const RESUBSCRIBE_AFTER_LOSS: Duration = Duration::from_secs(1);
+/// Resubscribe backoff after a lost subscription: doubles per consecutive loss up to the cap.
+const RESUBSCRIBE_FIRST: Duration = Duration::from_secs(1);
+const RESUBSCRIBE_MAX: Duration = Duration::from_secs(30);
+const NOTICE_MS: i64 = 5_000;
 const REDRAW_EVERY: Duration = Duration::from_secs(1);
 const USAGE: &str = "usage: herdr-trail [--popup] [--view time|sequence|area|heat|dash] [--orient h|v] | --dump [--width N --height N --keys \"j j Tab\" ...] | open split|popup | record | follow";
 
@@ -170,7 +173,7 @@ fn refresh(app: &mut App) -> bool {
 fn start(o: &Opts) -> (App, bool) {
     let now = now_ms();
     let mut state = State::new(self_pane());
-    for e in history::load_since(&history::log_dir(), &history::session_name(), now, now - HISTORY_MS) {
+    for e in history::load_since(&history::log_dir(), &history::session_name(), now, now - history_ms()) {
         if let Some(h) = e.host_event() {
             state.apply(&h, e.ts_ms, false);
         }
@@ -236,6 +239,7 @@ fn run_tui(o: &Opts) -> anyhow::Result<()> {
     let mut sub: Option<Subscriber> = None;
     let mut sub_ids: BTreeSet<String> = BTreeSet::new();
     let mut resubscribe_at: Option<Instant> = None;
+    let mut backoff = RESUBSCRIBE_FIRST;
     let mut notified: HashSet<(u64, usize)> = HashSet::new();
 
     let mut next_snapshot = Instant::now() + if connected { SNAPSHOT_EVERY } else { RETRY_EVERY };
@@ -296,6 +300,7 @@ fn run_tui(o: &Opts) -> anyhow::Result<()> {
             while let Ok(msg) = rx.try_recv() {
                 match msg {
                     Msg::SubStarted(g) if g == generation => {
+                        backoff = RESUBSCRIBE_FIRST;
                         refresh(&mut app);
                         dirty = true;
                     }
@@ -306,8 +311,19 @@ fn run_tui(o: &Opts) -> anyhow::Result<()> {
                         app.refresh_usage();
                         dirty = true;
                     }
-                    Msg::Lost(g) if g == generation => {
-                        resubscribe_at = Some(Instant::now() + RESUBSCRIBE_AFTER_LOSS);
+                    Msg::Lost(g, code) if g == generation => {
+                        let text = match code.as_deref() {
+                            Some("events_lost") => {
+                                refresh(&mut app);
+                                "events lost — resynced".to_string()
+                            }
+                            Some(code) => format!("subscription ended: {code}"),
+                            None => "subscription ended".to_string(),
+                        };
+                        app.notice = Some((text, now_ms() + NOTICE_MS));
+                        resubscribe_at = Some(Instant::now() + backoff);
+                        backoff = (backoff * 2).min(RESUBSCRIBE_MAX);
+                        dirty = true;
                     }
                     _ => {}
                 }
@@ -377,5 +393,25 @@ mod tests {
         assert_eq!(codes, [KeyCode::Char('j'), KeyCode::Tab, KeyCode::Char('?'), KeyCode::Char(' ')]);
         assert!(parse_opts(&args("--dump --keys Nope")).is_err());
         assert!(parse_opts(&args("--keys j")).is_err(), "--keys needs --dump");
+    }
+
+    #[test]
+    fn parse_opts_reads_view_orient_dump_and_keys() {
+        let mut a = args("--dump --view heat --orient v --width 50 --height 30");
+        a.extend(["--keys".to_string(), "j Tab".to_string()]);
+        let o = parse_opts(&a).unwrap();
+        assert!(o.dump && !o.popup);
+        assert_eq!(o.view, preset_from_name("heat"));
+        assert_eq!(o.orient, Some(Orient::Vertical));
+        assert_eq!((o.width, o.height, o.keys.len()), (50, 30, 2));
+        assert!(parse_opts(&args("--view nope")).is_err());
+        assert!(parse_opts(&args("--orient x")).is_err());
+    }
+
+    #[test]
+    fn parse_opts_rejects_width_without_dump() {
+        assert!(parse_opts(&args("--width 50")).is_err());
+        assert!(parse_opts(&args("--popup --height 10")).is_err());
+        assert!(parse_opts(&args("--dump --width wide")).is_err());
     }
 }

@@ -8,7 +8,8 @@ use ratatui::style::{Modifier, Style};
 use super::gutter::fmt_cost;
 use super::layout::SizeClass;
 use super::{App, Mode, Orient, fmt_dur, hm, hms, node_glyph, put_str, status_glyph, truncate};
-use crate::model::{HISTORY_MS, Mark, status_time};
+use crate::config::history_ms;
+use crate::model::{Mark, status_time};
 use crate::session::fmt_tokens;
 use crate::theme::theme;
 
@@ -94,8 +95,8 @@ pub(super) fn draw(buf: &mut Buffer, area: Rect, bottom: bool, app: &App, li: us
         .collect();
     let fmt = |v: Option<u64>| v.map_or("–".into(), fmt_tokens);
     lines.push((format!("ctx {} · peak {}{window} {spark}", fmt(store.ctx_at(lane, end)), fmt(peak)), Style::new()));
-    let spend = store.spend_between(lane, now - HISTORY_MS, now);
-    let st = status_time(lane, now - HISTORY_MS, now);
+    let spend = store.spend_between(lane, now - history_ms(), now);
+    let st = status_time(lane, now - history_ms(), now);
     let working = if st.alive_ms > 0 { st.working_ms * 100 / st.alive_ms } else { 0 };
     lines.push((
         format!("{} · {} reqs · working {working}% · {} steps", fmt_cost(spend.cost), spend.requests, lane.steps.len()),

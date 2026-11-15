@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Datelike, Utc};
+use chrono::{DateTime, Datelike, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::herdr::PLUGIN_ID;
@@ -104,13 +104,20 @@ fn parse_lines(text: &str) -> impl Iterator<Item = LogEvent> + '_ {
     text.lines().filter(|l| !l.trim().is_empty()).filter_map(|l| serde_json::from_str(l).ok())
 }
 
-/// Events from the previous and current UTC month files, oldest first. Missing files, unparseable
-/// lines and a torn trailing line from a concurrent append are skipped.
-pub fn load_events(dir: &Path, now_ms: i64) -> Vec<LogEvent> {
+/// Events of the month files the window from `since_ms` to `now_ms` touches (the previous UTC month
+/// only when `since_ms` falls before this one), oldest first. Missing files, unparseable lines and
+/// a torn trailing line from a concurrent append are skipped.
+pub fn load_events(dir: &Path, now_ms: i64, since_ms: i64) -> Vec<LogEvent> {
     let now = utc(now_ms);
-    let (py, pm) = previous_month(now.year(), now.month());
+    let month_start = Utc.with_ymd_and_hms(now.year(), now.month(), 1, 0, 0, 0).single().map_or(0, |t| t.timestamp_millis());
+    let mut paths = Vec::new();
+    if since_ms < month_start {
+        let (py, pm) = previous_month(now.year(), now.month());
+        paths.push(month_file(dir, py, pm));
+    }
+    paths.push(month_file(dir, now.year(), now.month()));
     let mut events = Vec::new();
-    for path in [month_file(dir, py, pm), month_file(dir, now.year(), now.month())] {
+    for path in paths {
         let Ok(bytes) = std::fs::read(&path) else { continue };
         events.extend(parse_lines(&String::from_utf8_lossy(&bytes)));
     }
@@ -118,12 +125,75 @@ pub fn load_events(dir: &Path, now_ms: i64) -> Vec<LogEvent> {
     events
 }
 
-/// `HERDR_SESSION`, `default` when unset or empty.
+/// The herdr session: `HERDR_SESSION`, else the name in a `…/sessions/<name>/herdr.sock` socket
+/// path, else `default`.
 pub fn session_name() -> String {
-    env_nonempty("HERDR_SESSION").unwrap_or_else(|| "default".into())
+    session_from(env_nonempty("HERDR_SESSION"), env_nonempty("HERDR_SOCKET_PATH"))
 }
 
-/// Events of `session` at or after `since_ms`, oldest first (previous + current UTC month files).
+fn session_from(session: Option<String>, socket: Option<String>) -> String {
+    session
+        .or_else(|| {
+            let path = PathBuf::from(socket?);
+            let dir = path.parent()?;
+            (path.file_name()? == "herdr.sock" && dir.parent()?.file_name()? == "sessions")
+                .then(|| dir.file_name().map(|n| n.to_string_lossy().to_string()))
+                .flatten()
+        })
+        .unwrap_or_else(|| "default".into())
+}
+
+/// Events of `session` at or after `since_ms`, oldest first.
 pub fn load_since(dir: &Path, session: &str, now_ms: i64, since_ms: i64) -> Vec<LogEvent> {
-    load_events(dir, now_ms).into_iter().filter(|e| e.session == session && e.ts_ms >= since_ms).collect()
+    load_events(dir, now_ms, since_ms).into_iter().filter(|e| e.session == session && e.ts_ms >= since_ms).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("herdr-trail-history-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn line(ts_ms: i64, session: &str) -> String {
+        format!(r#"{{"ts_ms":{ts_ms},"session":"{session}","event":"pane.closed","pane_id":"w1:p1","workspace_id":"w1"}}"#)
+    }
+
+    fn ms(y: i32, m: u32, d: u32) -> i64 {
+        Utc.with_ymd_and_hms(y, m, d, 12, 0, 0).unwrap().timestamp_millis()
+    }
+
+    #[test]
+    fn load_reads_previous_month_only_when_the_window_crosses_it() {
+        let dir = temp("months");
+        std::fs::write(dir.join("events-2026-10.jsonl"), line(ms(2026, 10, 31), "default") + "\n").unwrap();
+        std::fs::write(dir.join("events-2026-11.jsonl"), line(ms(2026, 11, 14), "default") + "\n").unwrap();
+        let now = ms(2026, 11, 14);
+        assert_eq!(load_events(&dir, now, now - 3_600_000).len(), 1, "a window inside November reads one file");
+        assert_eq!(load_events(&dir, now, ms(2026, 10, 30)).len(), 2);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn load_skips_torn_and_foreign_session_lines() {
+        let dir = temp("torn");
+        let now = ms(2026, 11, 14);
+        let text = format!("{}\n{}\n{}", line(now - 10, "default"), line(now - 5, "other"), &line(now, "default")[..20]);
+        std::fs::write(dir.join("events-2026-11.jsonl"), text).unwrap();
+        let events = load_since(&dir, "default", now, now - 1000);
+        assert_eq!(events.iter().map(|e| e.ts_ms).collect::<Vec<_>>(), [now - 10]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn session_name_from_socket_path() {
+        assert_eq!(session_from(Some("work".into()), None), "work");
+        assert_eq!(session_from(None, Some("/home/u/.config/herdr/sessions/side/herdr.sock".into())), "side");
+        assert_eq!(session_from(None, Some("/home/u/.config/herdr/herdr.sock".into())), "default");
+        assert_eq!(session_from(None, None), "default");
+    }
 }

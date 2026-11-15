@@ -73,6 +73,26 @@ impl Default for Theme {
     }
 }
 
+impl Theme {
+    /// The light preset: a light background with darker greys, and the whole ramp, whose dark end
+    /// reads on light.
+    fn light() -> Theme {
+        Theme {
+            background: Color::Rgb(0xf5, 0xf5, 0xf7),
+            dim: Color::Rgb(0x6e, 0x6e, 0x73),
+            grid: Color::Rgb(0xd2, 0xd2, 0xd7),
+            accent: Color::Blue,
+            series_from: 0.0,
+            ..Theme::default()
+        }
+    }
+}
+
+/// Whether a `COLORFGBG` value (`fg;bg`, sometimes with a middle field) names a light background.
+fn light_background(colorfgbg: Option<&str>) -> bool {
+    colorfgbg.and_then(|v| v.rsplit(';').next()).is_some_and(|bg| matches!(bg.trim(), "7" | "15"))
+}
+
 fn parse(s: &str) -> Result<Color, String> {
     Color::from_str(s).map_err(|_| format!("{s:?} is not a color"))
 }
@@ -180,8 +200,22 @@ impl Theme {
     }
 
     /// Applies the keys of a `theme.toml`; returns one message per key it couldn't use.
+    /// `appearance` goes first: it picks the base the other keys adjust.
     pub fn apply(&mut self, table: &Table) -> Vec<String> {
         let mut problems = Vec::new();
+        if let Some(v) = table.get("appearance") {
+            let light = match v.as_str() {
+                Some("dark") => Some(false),
+                Some("light") => Some(true),
+                Some("auto") => Some(light_background(std::env::var("COLORFGBG").ok().as_deref())),
+                _ => None,
+            };
+            match light {
+                Some(true) => *self = Theme::light(),
+                Some(false) => *self = Theme::default(),
+                None => problems.push("appearance: expected \"dark\", \"light\" or \"auto\"".to_string()),
+            }
+        }
         for (key, value) in table {
             match (key.as_str(), value.as_table()) {
                 // Each nested key stands alone, so one bad entry doesn't drop its siblings.
@@ -239,6 +273,8 @@ impl Theme {
             "series_from" => self.series_from = fraction()?,
             "fill_alpha" => self.fill_alpha = fraction()?,
             "status" | "node" => return Err("expected a table".into()),
+            // Applied first, by `apply`.
+            "appearance" => {}
             _ => return Err("unknown key".into()),
         }
         Ok(())
@@ -348,6 +384,18 @@ mod tests {
         assert_eq!(problems.len(), 3, "{problems:?}");
         assert!(problems.iter().any(|p| p.starts_with("bogus")));
         assert!(problems.iter().any(|p| p.starts_with("status.sleepy")));
+    }
+
+    #[test]
+    fn appearance_picks_the_base_before_other_keys() {
+        let table: Table = "accent = \"magenta\"\nappearance = \"light\"".parse().unwrap();
+        let mut t = Theme::default();
+        assert!(t.apply(&table).is_empty());
+        assert_eq!(t.background, Color::Rgb(0xf5, 0xf5, 0xf7));
+        assert_eq!(t.series_from, 0.0);
+        assert_eq!(t.accent, Color::Magenta, "keys after the preset still apply");
+        assert!(light_background(Some("0;15")) && light_background(Some("0;default;7")));
+        assert!(!light_background(Some("15;0")) && !light_background(None));
     }
 
     #[test]

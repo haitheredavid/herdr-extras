@@ -185,23 +185,29 @@ pub fn host_event(env: &Envelope) -> Option<HostEvent> {
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 const IO_TIMEOUT: Duration = Duration::from_secs(2);
 pub const PLUGIN_ID: &str = "herdr-trail";
+/// herdr protocol trail was built and tested against; a newer one shows a warning.
+pub const KNOWN_PROTOCOL: u32 = 22;
 
 /// Plugin id herdr launched us under, else the manifest id.
 pub fn plugin_id() -> String {
     std::env::var("HERDR_PLUGIN_ID").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| PLUGIN_ID.into())
 }
 
+/// `$HERDR_SOCKET_PATH`, else the named session's socket (`$HERDR_SESSION`), else the default one.
 pub fn socket_path() -> PathBuf {
-    if let Some(p) = std::env::var_os("HERDR_SOCKET_PATH") {
+    if let Some(p) = std::env::var_os("HERDR_SOCKET_PATH").filter(|p| !p.is_empty()) {
         return PathBuf::from(p);
     }
-    let home = std::env::var_os("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".config/herdr/herdr.sock")
+    let config = PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config/herdr");
+    match std::env::var("HERDR_SESSION").ok().filter(|s| !s.is_empty()) {
+        Some(name) => config.join("sessions").join(name).join("herdr.sock"),
+        None => config.join("herdr.sock"),
+    }
 }
 
 fn connect() -> anyhow::Result<UnixStream> {
     let path = socket_path();
-    UnixStream::connect(&path).with_context(|| format!("connect {}", path.display()))
+    UnixStream::connect(&path).map_err(|e| anyhow!("herdr not reachable at {}: {e}", path.display()))
 }
 
 fn request_line(method: &str, params: Value) -> String {
@@ -251,7 +257,22 @@ pub struct Envelope {
 pub enum Msg {
     SubStarted(u64),
     Event(u64, Envelope),
-    Lost(u64),
+    /// The subscription ended: with herdr's error code, or None when the stream closed.
+    Lost(u64, Option<String>),
+}
+
+/// One subscription line as a message; None for lines that aren't events, starts or errors.
+fn parse_line(line: &str, generation: u64) -> Option<Msg> {
+    let mut v = serde_json::from_str::<Value>(line).ok()?;
+    if let Some((code, _)) = error_of(&v) {
+        return Some(Msg::Lost(generation, Some(code)));
+    }
+    if let Some(kind) = v.get("event").and_then(Value::as_str) {
+        let event = kind.replace('.', "_");
+        let data = v.get_mut("data").map(Value::take).unwrap_or(Value::Null);
+        return Some(Msg::Event(generation, Envelope { event, data }));
+    }
+    (v.pointer("/result/type").and_then(Value::as_str) == Some("subscription_started")).then_some(Msg::SubStarted(generation))
 }
 
 pub struct Subscriber {
@@ -287,24 +308,37 @@ pub fn subscribe(generation: u64, pane_ids: &[String], tx: Sender<Msg>) -> anyho
                 Ok(0) | Err(_) => break,
                 Ok(_) => {}
             }
-            let Ok(mut v) = serde_json::from_str::<Value>(&line) else { continue };
-            if error_of(&v).is_some() {
-                break;
-            }
-            if let Some(kind) = v.get("event").and_then(Value::as_str) {
-                let event = kind.replace('.', "_");
-                let data = v.get_mut("data").map(Value::take).unwrap_or(Value::Null);
-                if tx.send(Msg::Event(generation, Envelope { event, data })).is_err() {
-                    return;
-                }
-            } else if v.pointer("/result/type").and_then(Value::as_str) == Some("subscription_started")
-                && tx.send(Msg::SubStarted(generation)).is_err()
-            {
+            let Some(msg) = parse_line(&line, generation) else { continue };
+            let lost = matches!(msg, Msg::Lost(..));
+            if tx.send(msg).is_err() || lost {
                 return;
             }
         }
-        let _ = tx.send(Msg::Lost(generation));
+        let _ = tx.send(Msg::Lost(generation, None));
     });
 
     Ok(Subscriber { generation, stream })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_line_maps_events_starts_and_errors() {
+        let event = r#"{"event":"pane.agent_status_changed","data":{"pane_id":"w1:p1"}}"#;
+        match parse_line(event, 3) {
+            Some(Msg::Event(3, env)) => {
+                assert_eq!(env.event, "pane_agent_status_changed", "dotted names become snake case");
+                assert_eq!(env.data["pane_id"], "w1:p1");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(parse_line(r#"{"result":{"type":"subscription_started"}}"#, 3), Some(Msg::SubStarted(3))));
+        assert!(
+            matches!(parse_line(r#"{"error":{"code":"events_lost"}}"#, 3), Some(Msg::Lost(3, Some(c))) if c == "events_lost")
+        );
+        assert!(parse_line(r#"{"result":{"type":"ok"}}"#, 3).is_none());
+        assert!(parse_line("not json", 3).is_none());
+    }
 }

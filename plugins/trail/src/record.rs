@@ -3,8 +3,10 @@
 
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::path::Path;
 
 use anyhow::Context;
+use chrono::Datelike;
 use serde_json::{Value, json};
 
 use crate::history::{LogEvent, log_dir, log_file, session_name};
@@ -38,6 +40,7 @@ pub fn run() -> anyhow::Result<()> {
     let dir = log_dir();
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     let path = log_file(&dir, ts_ms);
+    let new_month = !path.exists();
     let mut line = serde_json::to_string(&record)?;
     line.push('\n');
     OpenOptions::new()
@@ -45,7 +48,32 @@ pub fn run() -> anyhow::Result<()> {
         .append(true)
         .open(&path)
         .and_then(|mut f| f.write_all(line.as_bytes()))
-        .with_context(|| format!("append {}", path.display()))
+        .with_context(|| format!("append {}", path.display()))?;
+    if new_month {
+        prune_months(&dir, ts_ms, crate::config::config().retain_months);
+    }
+    Ok(())
+}
+
+/// Deletes month files `retain` or more months older than `now_ms`'s month; 0 keeps them all.
+/// Runs when a new month's file starts, and ignores what it can't delete.
+fn prune_months(dir: &Path, now_ms: i64, retain: u32) {
+    if retain == 0 {
+        return;
+    }
+    let now = chrono::DateTime::from_timestamp_millis(now_ms).unwrap_or_default();
+    let current = now.year() * 12 + now.month() as i32;
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for path in entries.flatten().map(|e| e.path()) {
+        let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let Some(ym) = name.strip_prefix("events-").and_then(|n| n.strip_suffix(".jsonl")) else { continue };
+        let Some((y, m)) = ym.split_once('-').and_then(|(y, m)| Some((y.parse::<i32>().ok()?, m.parse::<i32>().ok()?))) else {
+            continue;
+        };
+        if y * 12 + m <= current - retain as i32 {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
 }
 
 fn env_json(key: &str) -> Value {
@@ -239,5 +267,25 @@ mod tests {
     fn snake_event_names_become_dotted() {
         assert_eq!(dotted("pane_agent_status_changed"), "pane.agent_status_changed");
         assert_eq!(dotted("pane.closed"), "pane.closed");
+    }
+
+    #[test]
+    fn retention_deletes_old_months_on_rollover() {
+        let dir = std::env::temp_dir().join(format!("herdr-trail-retain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for m in ["2026-07", "2026-08", "2026-09", "2026-10", "2026-11"] {
+            std::fs::write(dir.join(format!("events-{m}.jsonl")), "").unwrap();
+        }
+        std::fs::write(dir.join("prefs.toml"), "").unwrap();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-01T00:00:05Z").unwrap().timestamp_millis();
+        prune_months(&dir, now, 3);
+        let mut left: Vec<String> =
+            std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect();
+        left.sort();
+        assert_eq!(left, ["events-2026-09.jsonl", "events-2026-10.jsonl", "events-2026-11.jsonl", "prefs.toml"]);
+        prune_months(&dir, now, 0);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 4, "0 keeps every month");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -6,7 +6,11 @@ use std::sync::LazyLock;
 
 use toml::{Table, Value};
 
+use crate::session::text::TextLevel;
 use crate::view::preset_from_name;
+
+/// History window by default: two hours.
+const DEFAULT_HISTORY_MS: i64 = 7_200_000;
 
 /// `$HERDR_PLUGIN_CONFIG_DIR`, else `~/.config/herdr/plugins/config/<plugin id>`.
 pub fn config_dir() -> PathBuf {
@@ -14,6 +18,22 @@ pub fn config_dir() -> PathBuf {
         let home = std::env::var_os("HOME").unwrap_or_default();
         PathBuf::from(home).join(".config/herdr/plugins/config").join(crate::herdr::PLUGIN_ID)
     })
+}
+
+/// Which way the band splits off the focused pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Split {
+    Down,
+    Right,
+}
+
+impl Split {
+    pub fn name(self) -> &'static str {
+        match self {
+            Split::Down => "down",
+            Split::Right => "right",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -26,10 +46,25 @@ pub struct Config {
     pub remember: bool,
     /// Mouse capture: click to select, double-click to jump.
     pub mouse: bool,
+    /// `[history] window`: log load, lane pruning, cost and working windows, the fit cap.
+    pub history_ms: i64,
+    /// `[history] retain_months`: month files kept; 0 keeps all.
+    pub retain_months: u32,
+    pub band_split: Split,
+    /// `[band] rows`: band height when it splits down.
+    pub band_rows: u16,
+    /// `[band] columns`: band width when it splits right.
+    pub band_columns: u16,
+    /// `[band] follow`: pin the band and move it into the focused tab.
+    pub band_follow: bool,
+    pub popup_width: String,
+    pub popup_height: String,
     /// `[filter] quiet_after`: how long an idle, done or unknown agent stays in `active_only`.
     pub quiet_after_ms: i64,
     /// `[notify] blocked_after`: notify when an agent has been blocked this long; None is off.
     pub blocked_after_ms: Option<i64>,
+    /// `[privacy] max_text`: the most the timeline's `T` reveals.
+    pub max_text: TextLevel,
 }
 
 impl Default for Config {
@@ -39,8 +74,17 @@ impl Default for Config {
             start_orient: None,
             remember: true,
             mouse: false,
+            history_ms: DEFAULT_HISTORY_MS,
+            retain_months: 3,
+            band_split: Split::Down,
+            band_rows: 14,
+            band_columns: 50,
+            band_follow: true,
+            popup_width: "80%".into(),
+            popup_height: "80%".into(),
             quiet_after_ms: 30 * 60_000,
             blocked_after_ms: None,
+            max_text: TextLevel::Prompt,
         }
     }
 }
@@ -59,6 +103,8 @@ pub fn parse_dur(s: &str) -> Option<i64> {
     )
 }
 
+const TABLES: [&str; 7] = ["start", "history", "band", "popup", "filter", "notify", "privacy"];
+
 impl Config {
     /// Applies the keys of a `config.toml`; returns one message per key it couldn't use.
     fn apply(&mut self, table: &Table) -> Vec<String> {
@@ -66,15 +112,15 @@ impl Config {
         for (key, value) in table {
             let result = match (key.as_str(), value.as_table()) {
                 ("mouse", _) => value.as_bool().map(|b| self.mouse = b).ok_or_else(|| "expected true or false".to_string()),
-                ("start" | "filter" | "notify", Some(inner)) => {
+                (t, Some(inner)) if TABLES.contains(&t) => {
                     for (name, v) in inner {
-                        if let Err(e) = self.set(key, name, v) {
+                        if let Err(e) = self.set(t, name, v) {
                             problems.push(format!("{key}.{name}: {e}"));
                         }
                     }
                     Ok(())
                 }
-                ("start" | "filter" | "notify", None) => Err("expected a table".into()),
+                (t, None) if TABLES.contains(&t) => Err("expected a table".into()),
                 _ => Err("unknown key".into()),
             };
             if let Err(e) = result {
@@ -86,7 +132,24 @@ impl Config {
 
     fn set(&mut self, table: &str, name: &str, value: &Value) -> Result<(), String> {
         let text = || value.as_str().ok_or_else(|| "expected a string".to_string());
+        let flag = || value.as_bool().ok_or_else(|| "expected true or false".to_string());
         let dur = || text().and_then(|v| parse_dur(v).ok_or_else(|| format!("expected a duration like \"5m\", got {v:?}")));
+        let cells = |lo: i64, hi: i64| {
+            value
+                .as_integer()
+                .filter(|n| (lo..=hi).contains(n))
+                .map(|n| n as u16)
+                .ok_or_else(|| format!("expected a number from {lo} to {hi}"))
+        };
+        let size = || {
+            text().and_then(|v| {
+                v.strip_suffix('%')
+                    .and_then(|n| n.parse::<u8>().ok())
+                    .filter(|n| (10..=100).contains(n))
+                    .map(|_| v.to_string())
+                    .ok_or_else(|| format!("expected a size like \"80%\", got {v:?}"))
+            })
+        };
         match (table, name) {
             ("start", "view") => {
                 let v = text()?;
@@ -100,9 +163,31 @@ impl Config {
                 }
                 self.start_orient = Some(v.to_string());
             }
-            ("start", "remember") => self.remember = value.as_bool().ok_or("expected true or false")?,
+            ("start", "remember") => self.remember = flag()?,
+            ("history", "window") => self.history_ms = dur()?.max(60_000),
+            ("history", "retain_months") => self.retain_months = cells(0, 1200)?.into(),
+            ("band", "split") => {
+                self.band_split = match text()? {
+                    "down" => Split::Down,
+                    "right" => Split::Right,
+                    v => return Err(format!("expected \"down\" or \"right\", got {v:?}")),
+                }
+            }
+            ("band", "rows") => self.band_rows = cells(4, 200)?,
+            ("band", "columns") => self.band_columns = cells(20, 400)?,
+            ("band", "follow") => self.band_follow = flag()?,
+            ("popup", "width") => self.popup_width = size()?,
+            ("popup", "height") => self.popup_height = size()?,
             ("filter", "quiet_after") => self.quiet_after_ms = dur()?,
             ("notify", "blocked_after") => self.blocked_after_ms = Some(dur()?),
+            ("privacy", "max_text") => {
+                self.max_text = match text()? {
+                    "none" => TextLevel::None,
+                    "intent" => TextLevel::Intent,
+                    "prompt" => TextLevel::Prompt,
+                    v => return Err(format!("expected none, intent or prompt, got {v:?}")),
+                }
+            }
             _ => return Err("unknown key".into()),
         }
         Ok(())
@@ -130,6 +215,11 @@ pub fn config() -> &'static Config {
     &CONFIG.0
 }
 
+/// The history window: what the log loads, how long closed lanes stay, and the cost window.
+pub fn history_ms() -> i64 {
+    config().history_ms
+}
+
 /// Keys of `config.toml` that couldn't be used, for the header.
 pub fn config_problems() -> &'static [String] {
     &CONFIG.1
@@ -141,21 +231,46 @@ mod tests {
 
     #[test]
     fn keys_are_checked_and_bad_ones_keep_defaults() {
-        let table: Table = "bogus = 1\nmouse = true\n[start]\nview = \"heat\"\norient = \"sideways\"\nremember = false\n[filter]\nquiet_after = \"10m\"\n[notify]\nblocked_after = \"soon\""
-            .parse()
-            .unwrap();
+        let table: Table = r#"
+            bogus = 1
+            mouse = true
+            [start]
+            view = "heat"
+            orient = "sideways"
+            remember = false
+            [history]
+            window = "6h"
+            retain_months = 0
+            [band]
+            split = "right"
+            columns = 60
+            rows = 2
+            [popup]
+            width = "90%"
+            height = "huge"
+            [filter]
+            quiet_after = "10m"
+            [notify]
+            blocked_after = "soon"
+            [privacy]
+            max_text = "intent"
+        "#
+        .parse()
+        .unwrap();
         let mut c = Config::default();
         let mut problems = c.apply(&table);
         problems.sort();
         assert_eq!(c.start_view.as_deref(), Some("heat"));
         assert_eq!(c.start_orient, None, "invalid value keeps the default");
         assert!(c.mouse && !c.remember);
+        assert_eq!((c.history_ms, c.retain_months), (6 * 3_600_000, 0));
+        assert_eq!((c.band_split, c.band_columns, c.band_rows), (Split::Right, 60, 14));
+        assert_eq!((c.popup_width.as_str(), c.popup_height.as_str()), ("90%", "80%"));
         assert_eq!(c.quiet_after_ms, 600_000);
         assert_eq!(c.blocked_after_ms, None);
-        assert_eq!(problems.len(), 3, "{problems:?}");
-        assert!(problems[0].starts_with("bogus: unknown key"));
-        assert!(problems[1].starts_with("notify.blocked_after"));
-        assert!(problems[2].starts_with("start.orient"));
+        assert_eq!(c.max_text, TextLevel::Intent);
+        let names: Vec<&str> = problems.iter().map(|p| p.split(':').next().unwrap()).collect();
+        assert_eq!(names, ["band.rows", "bogus", "notify.blocked_after", "popup.height", "start.orient"], "{problems:?}");
     }
 
     #[test]

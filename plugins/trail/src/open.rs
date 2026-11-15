@@ -1,14 +1,28 @@
-//! `herdr-trail open split|popup`: opens the trail from an action, as a band (a split below the
-//! focused pane, shortened to `BAND_ROWS` and pinned so it follows focus across workspaces) or as
-//! a large popup over the layout.
+//! `herdr-trail open split|popup`: opens the trail from an action, as a band (a split off the
+//! focused pane, sized to `[band] rows` or `columns` and pinned so it follows focus across
+//! workspaces) or as a large popup over the layout.
 
 use anyhow::{anyhow, bail};
 use serde_json::{Value, json};
 
+use crate::config::{Split, config};
 use crate::herdr::{plugin_id, request};
 
-/// Band height in rows: header, two usage-band lanes, detail and footer.
-pub const BAND_ROWS: u16 = 14;
+/// Which side of a pane rect `shorten` sizes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Axis2 {
+    Rows,
+    Columns,
+}
+
+/// The band's size along its split, from `[band]`.
+pub fn band_size() -> (u16, Axis2) {
+    let c = config();
+    match c.band_split {
+        Split::Down => (c.band_rows, Axis2::Rows),
+        Split::Right => (c.band_columns, Axis2::Columns),
+    }
+}
 
 pub fn run(args: &[String]) -> anyhow::Result<()> {
     match args.first().map(String::as_str) {
@@ -19,14 +33,15 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
                     "plugin_id": plugin_id(),
                     "entrypoint": "trail",
                     "placement": "split",
-                    "direction": "down",
+                    "direction": config().band_split.name(),
                     "focus": true,
                 }),
             )?;
             let pane = &opened["plugin_pane"]["pane"];
             let pane_id = pane["pane_id"].as_str().ok_or_else(|| anyhow!("plugin.pane.open: no pane id in response"))?;
-            shorten(pane_id, BAND_ROWS)?;
-            crate::follow::pin(pane)
+            let (cells, axis) = band_size();
+            shorten(pane_id, cells, axis)?;
+            if config().band_follow { crate::follow::pin(pane) } else { Ok(()) }
         }
         Some("popup") => request(
             "plugin.pane.open",
@@ -34,8 +49,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
                 "plugin_id": plugin_id(),
                 "entrypoint": "trail-popup",
                 "placement": "popup",
-                "width": "80%",
-                "height": "80%",
+                "width": config().popup_width,
+                "height": config().popup_height,
                 "focus": true,
             }),
         )
@@ -44,8 +59,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     }
 }
 
-/// herdr only sizes popups, so shrink the new split to `rows` by setting its parent split's ratio.
-pub fn shorten(pane_id: &str, rows: u16) -> anyhow::Result<()> {
+/// herdr only sizes popups, so size the new split to `cells` rows or columns by setting its parent
+/// split's ratio.
+pub fn shorten(pane_id: &str, cells: u16, axis: Axis2) -> anyhow::Result<()> {
     let export = request("layout.export", json!({ "pane_id": pane_id }))?;
     let root = &export["layout"]["root"];
     let path = path_to(root, pane_id).ok_or_else(|| anyhow!("layout.export: {pane_id} not in tab layout"))?;
@@ -55,12 +71,16 @@ pub fn shorten(pane_id: &str, rows: u16) -> anyhow::Result<()> {
     leaves(parent, &mut members);
 
     let layout = request("pane.layout", json!({ "pane_id": pane_id }))?;
+    let (from, len) = match axis {
+        Axis2::Rows => ("y", "height"),
+        Axis2::Columns => ("x", "width"),
+    };
     let rects: Vec<(i64, i64)> = layout["layout"]["panes"]
         .as_array()
         .into_iter()
         .flatten()
         .filter(|p| p["pane_id"].as_str().is_some_and(|id| members.contains(&id)))
-        .filter_map(|p| Some((p["rect"]["y"].as_i64()?, p["rect"]["y"].as_i64()? + p["rect"]["height"].as_i64()?)))
+        .filter_map(|p| Some((p["rect"][from].as_i64()?, p["rect"][from].as_i64()? + p["rect"][len].as_i64()?)))
         .collect();
     let (Some(top), Some(bottom)) = (rects.iter().map(|r| r.0).min(), rects.iter().map(|r| r.1).max()) else {
         bail!("pane.layout: no rects for the split around {pane_id}");
@@ -70,7 +90,7 @@ pub fn shorten(pane_id: &str, rows: u16) -> anyhow::Result<()> {
         json!({
             "tab_id": export["layout"]["tab_id"],
             "path": parent_path,
-            "ratio": first_ratio(is_second, (bottom - top) as f64, f64::from(rows)),
+            "ratio": first_ratio(is_second, (bottom - top) as f64, f64::from(cells)),
         }),
     )?;
     Ok(())

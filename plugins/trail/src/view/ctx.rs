@@ -7,7 +7,8 @@ use ratatui::style::Style;
 
 use super::gutter::fmt_cost;
 use super::{App, Grid, Orient, Pt, put_str};
-use crate::model::{HISTORY_MS, Lane};
+use crate::config::history_ms;
+use crate::model::Lane;
 use crate::session::{Store, fmt_tokens};
 use crate::theme::theme;
 
@@ -58,7 +59,7 @@ pub(super) fn totals(buf: &mut Buffer, grid: &Grid, app: &App, rows: &[usize]) {
     let ctx: u64 = rows.iter().filter_map(|&li| app.sessions.ctx_at(&app.state.lanes[li], now)).sum();
     let cost = rows
         .iter()
-        .filter_map(|&li| app.sessions.spend_between(&app.state.lanes[li], now - HISTORY_MS, now).cost)
+        .filter_map(|&li| app.sessions.spend_between(&app.state.lanes[li], now - history_ms(), now).cost)
         .reduce(|a, b| a + b);
     let mut rx = grid.body.right().saturating_sub(grid.cols.right());
     if grid.cols.ctx {
