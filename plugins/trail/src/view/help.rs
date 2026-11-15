@@ -14,8 +14,9 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
     (
         "MOVE",
         &[
-            ("j/k ↓/↑", "next/previous agent (l/h →/← in columns)"),
-            ("h/l ←/→", "back/forward in time (k/j ↑/↓ in columns)"),
+            ("j/k", "next/previous agent (arrows follow the screen)"),
+            ("h/l H/L", "back/forward in time, a quarter or a whole strip"),
+            ("Home/End", "first/last agent; PgUp/PgDn a page"),
             ("f", "follow now"),
             ("0", "follow now and fit time to the history"),
         ],
@@ -23,15 +24,27 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
     (
         "SHOW",
         &[
-            ("Tab 1-5", "next view / TIME SEQUENCE AREA HEAT DASH"),
+            ("Tab", "LANES ⇄ USAGE"),
+            ("1-5", "time, sequence, area, heat, dash"),
+            ("v", "lens: status, heat, ctx (USAGE: stacked or overlaid)"),
+            ("t", "status lens on time or steps"),
+            ("Space", "expand the agent into a usage band"),
+            ("Z", "density: auto, compact, roomy"),
             ("o", "agents as rows or columns"),
             ("+/-", "zoom time in/out"),
-            ("s", "AREA: stacked, overlaid or stream"),
-            ("u", "usage bands on/off"),
             ("c", "show closed agents"),
         ],
     ),
-    ("ACT", &[("Enter", "jump to the agent's pane"), ("r", "refresh now"), ("?", "this help"), ("q", "quit (Esc in a popup)")]),
+    (
+        "ACT",
+        &[
+            ("Enter", "jump to the agent's pane"),
+            ("r", "refresh now"),
+            ("?", "this help"),
+            ("Esc", "collapse, then close a popup"),
+            ("q", "quit"),
+        ],
+    ),
 ];
 
 const LEGEND: [&str; 2] = [

@@ -6,7 +6,7 @@ use std::sync::LazyLock;
 
 use toml::{Table, Value};
 
-use crate::view::ViewKind;
+use crate::view::preset_from_name;
 
 /// `$HERDR_PLUGIN_CONFIG_DIR`, else `~/.config/herdr/plugins/config/<plugin id>`.
 pub fn config_dir() -> PathBuf {
@@ -49,7 +49,7 @@ impl Config {
         match name {
             "view" => {
                 let v = text()?;
-                ViewKind::from_name(v).ok_or_else(|| format!("unknown view {v:?}"))?;
+                preset_from_name(v).ok_or_else(|| format!("unknown view {v:?}"))?;
                 self.start_view = Some(v.to_string());
             }
             "orient" => {

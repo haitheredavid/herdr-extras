@@ -21,7 +21,7 @@ use serde_json::json;
 
 use herdr::{Msg, Subscriber};
 use model::{HISTORY_MS, State};
-use view::{App, Orient, ViewKind};
+use view::{App, Orient, preset_from_name};
 
 const SNAPSHOT_EVERY: Duration = Duration::from_secs(5);
 const RETRY_EVERY: Duration = Duration::from_secs(2);
@@ -40,7 +40,8 @@ fn self_pane() -> Option<String> {
 struct Opts {
     popup: bool,
     dump: bool,
-    view: ViewKind,
+    /// Preset `1`-`5` from a `--view` name.
+    view: u8,
     orient: Orient,
     width: u16,
     height: u16,
@@ -90,7 +91,7 @@ fn parse_orient(v: &str) -> anyhow::Result<Orient> {
 
 fn parse_opts(args: &[String]) -> anyhow::Result<Opts> {
     let cfg = config::config();
-    let view = cfg.start_view.as_deref().and_then(ViewKind::from_name).unwrap_or(ViewKind::Time);
+    let view = cfg.start_view.as_deref().and_then(preset_from_name).unwrap_or(1);
     let orient = cfg.start_orient.as_deref().and_then(|o| parse_orient(o).ok()).unwrap_or(Orient::Horizontal);
     let mut o = Opts { popup: false, dump: false, view, orient, width: 120, height: 30, keys: Vec::new() };
     let mut it = args.iter();
@@ -101,7 +102,7 @@ fn parse_opts(args: &[String]) -> anyhow::Result<Opts> {
             "--dump" => o.dump = true,
             "--view" => {
                 let v = value()?;
-                o.view = ViewKind::from_name(v).with_context(|| format!("unknown view {v:?}"))?;
+                o.view = preset_from_name(v).with_context(|| format!("unknown view {v:?}"))?;
             }
             "--orient" => o.orient = parse_orient(value()?)?,
             "--width" => o.width = value()?.parse().context("--width")?,

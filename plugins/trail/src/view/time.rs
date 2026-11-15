@@ -1,4 +1,5 @@
-//! Time view: cells are fixed time buckets, so line length is wall-clock duration.
+//! Status lens on the time axis: cells are fixed time buckets, so line length is wall-clock
+//! duration. Also the time-axis geometry the other timed lenses share.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -44,19 +45,26 @@ fn cell(lane: &Lane, t0: i64, t1: i64, now_ms: i64, orient: Orient) -> Cell {
     status_at(lane, t1 - 1).and_then(|s| line_cell(s, orient))
 }
 
-/// Cells for `lane`, each at the context in use at the end of its bucket (or now).
+/// Cells for `lane`, each at the context in use at the end of its bucket (or now) across a band
+/// `band` rows tall.
 #[allow(clippy::too_many_arguments)]
-fn pts(lane: &Lane, usage: &Store, scale: Scale, start: i64, bucket: i64, n: usize, now_ms: i64, orient: Orient) -> Vec<Pt> {
+pub(super) fn pts(
+    lane: &Lane,
+    store: &Store,
+    scale: Scale,
+    band: u16,
+    start: i64,
+    bucket: i64,
+    n: usize,
+    now_ms: i64,
+    orient: Orient,
+) -> Vec<Pt> {
     (0..n)
         .map(|i| {
             let t0 = start + i as i64 * bucket;
             let t1 = t0 + bucket;
             let at = (t1 - 1).min(now_ms);
-            Pt {
-                cell: cell(lane, t0, t1, now_ms, orient),
-                level: scale.level(usage.ctx_at(lane, at)),
-                status: status_at(lane, at),
-            }
+            Pt::new(cell(lane, t0, t1, now_ms, orient), scale.level(store.ctx_at(lane, at), band), status_at(lane, at))
         })
         .collect()
 }
@@ -72,38 +80,14 @@ pub(super) fn draw_axis(buf: &mut Buffer, grid: &Grid, start: i64, bucket: i64) 
     }
 }
 
-pub fn render(buf: &mut Buffer, body: Rect, app: &mut App, lanes: &[usize]) {
-    app.fit_bucket(lanes, cells(app, body));
-    let bucket = app.bucket_ms();
-    let lead = match app.orient {
-        Orient::Horizontal => 1,
-        Orient::Vertical => axis_w(bucket),
-    };
-    let scale = Scale::of(app, lanes, body.height.saturating_sub(lead));
-    if scale.band > 1 {
-        app.band_max = Some(scale.max);
-    }
-    let grid = Grid::new(app.orient, body, lead, scale.band, lanes.len());
-    let n = grid.n();
-    app.time_cells = n.max(1);
-    let start = start_ms(app, bucket, n);
-
-    draw_axis(buf, &grid, start, bucket);
-
-    let (now, orient) = (app.now_ms, app.orient);
-    grid.draw_lanes(buf, app, lanes, |lane, usage, n| pts(lane, usage, scale, start, bucket, n, now, orient));
-}
-
 #[cfg(test)]
 mod tests {
-    use super::super::ViewKind;
-    use super::super::tests::{col, render, row, sample_app};
+    use super::super::tests::{col, key, render, row, sample_app};
     use super::*;
-    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     #[test]
     fn horizontal_lane_ends_at_now_on_the_far_edge() {
-        let mut app = sample_app(ViewKind::Time, Orient::Horizontal);
+        let mut app = sample_app(1, Orient::Horizontal);
         // Header, axis row, lane row. 27 strip cells from column 33, 1 s buckets fit 8.5 s.
         let buf = render(&mut app, 60, 3);
         assert_eq!(row(&buf, 2, 33, 60).trim_start(), "◆─●━━▲╍╍▸");
@@ -111,12 +95,11 @@ mod tests {
         assert_eq!(buf[(59, 2)].fg, theme().blocked, "head in the current status color");
         assert_eq!(buf[(52, 2)].fg, theme().idle, "lines take their status color");
         assert_eq!(buf[(53, 2)].fg, theme().working, "status nodes keep status colors");
-        assert!(row(&buf, 0, 0, 60).starts_with("TIME seq area heat dash"));
     }
 
     #[test]
     fn vertical_lane_grows_downward() {
-        let mut app = sample_app(ViewKind::Time, Orient::Vertical);
+        let mut app = sample_app(1, Orient::Vertical);
         // Header, column header row, 14 cells of 1 s: now (8.5 s) in the last.
         let buf = render(&mut app, axis_w(1000) + 6, 16);
         let cells = col(&buf, axis_w(1000) + 2, 7, 16);
@@ -132,7 +115,7 @@ mod tests {
 
     /// Context 100 from the start, 400 from 4000 ms: the line bends up a level per cell of band.
     fn with_usage(orient: Orient) -> crate::view::App {
-        let mut app = sample_app(ViewKind::Time, orient);
+        let mut app = sample_app(1, orient);
         let id = app.state.lanes[0].id;
         app.sessions.insert_samples(id, &[(0, 100, Some(0.25)), (4000, 400, Some(0.5))]);
         app
@@ -152,9 +135,9 @@ mod tests {
         let wide = render(&mut app, 120, 7);
         assert!(row(&wide, 0, 0, 120).contains("ctx≤400"), "{}", row(&wide, 0, 0, 120));
 
-        app.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
+        key(&mut app, 'Z');
         let buf = render(&mut app, 60, 7);
-        assert_eq!(row(&buf, 2, 51, 60), "◆─●━━▲╍╍▸", "u flattens the bands");
+        assert_eq!(row(&buf, 2, 51, 60), "◆─●━━▲╍╍▸", "compact density flattens the bands");
     }
 
     #[test]

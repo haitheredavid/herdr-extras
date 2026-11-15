@@ -1,78 +1,73 @@
-//! Heat view: one row (↔) or column (↕) per agent, one cell per time bucket, shaded along the
-//! theme's ramp (the same stretch agent colors use) by the share of the bucket the agent spent
-//! working; `heat_blocked` where it was blocked at all.
+//! Heat lens: one cell per time bucket, shaded along the theme's ramp (the same stretch agent
+//! colors use) by the share of the bucket the agent spent working; `heat_blocked` where it was
+//! blocked at all. Cells are half-height `▀` in ↔ so neighboring rows stay apart, and fill the
+//! column in ↕. The key lives in the header.
 
-use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
-use ratatui::style::Style;
-
-use super::time::{axis_w, cells, draw_axis, start_ms};
-use super::{App, Grid, Orient, Pt, put_str};
-use crate::model::{Lane, status_time};
+use super::{Orient, Pt};
+use crate::model::{AgentStatus, Lane, status_time};
 use crate::theme::theme;
 
-fn pts(lane: &Lane, start: i64, bucket: i64, n: usize, now_ms: i64) -> Vec<Pt> {
+pub(super) fn pts(lane: &Lane, start: i64, bucket: i64, n: usize, now_ms: i64, orient: Orient) -> Vec<Pt> {
+    let glyph = match orient {
+        Orient::Horizontal => '▀',
+        Orient::Vertical => '█',
+    };
     (0..n)
         .map(|i| {
             let t0 = start + i as i64 * bucket;
-            let cell = (t0 <= now_ms)
-                .then(|| status_time(lane, t0, (t0 + bucket).min(now_ms + 1)))
-                .filter(|st| st.alive_ms > 0)
-                .map(|st| {
-                    let color = if st.blocked_ms > 0 {
-                        theme().heat_blocked
-                    } else {
-                        theme().heat_color(st.working_ms as f64 / st.alive_ms as f64)
-                    };
-                    ('█', color)
-                });
-            Pt { cell, level: 0, status: None }
+            let now_cell = lane.is_open() && (t0..t0 + bucket).contains(&now_ms);
+            let st = (t0 <= now_ms).then(|| status_time(lane, t0, (t0 + bucket).min(now_ms + 1)));
+            let color = match st {
+                Some(st) if st.blocked_ms > 0 => Some(theme().heat_blocked),
+                Some(st) if st.alive_ms > 0 => Some(theme().heat_color(st.working_ms as f64 / st.alive_ms as f64)),
+                // A lane first seen just after the frame's clock still shows what it is doing now.
+                _ if now_cell => Some(match lane.status {
+                    AgentStatus::Working => theme().heat_color(1.0),
+                    AgentStatus::Blocked => theme().heat_blocked,
+                    _ => theme().heat_color(0.0),
+                }),
+                _ => None,
+            };
+            Pt { fill: orient == Orient::Vertical, ..Pt::new(color.map(|c| (glyph, c)), 0, None) }
         })
         .collect()
 }
 
-pub fn render(buf: &mut Buffer, body: Rect, app: &mut App, lanes: &[usize]) {
-    let horizontal = app.orient == Orient::Horizontal;
-    app.fit_bucket(lanes, cells(app, body));
-    let bucket = app.bucket_ms();
-    let lead = if horizontal { 1 } else { axis_w(bucket) };
-    let grid = Grid::new(app.orient, body, lead, 1, lanes.len());
-    let n = grid.n();
-    app.time_cells = n.max(1);
-    let start = start_ms(app, bucket, n);
-    draw_axis(buf, &grid, start, bucket);
-
-    // Scale key in the corner the axis leaves free.
-    let dim = Style::new().fg(theme().dim);
-    let corner = Rect::new(body.x, body.y, if horizontal { grid.cols.left() } else { lead }, 1);
-    let steps = if horizontal { 10 } else { lead.saturating_sub(2) as usize };
-    let mut x = put_str(buf, corner, body.x, body.y, if horizontal { "idle " } else { "0" }, dim);
-    for i in 0..steps {
-        let t = i as f64 / steps.saturating_sub(1).max(1) as f64;
-        x = put_str(buf, corner, x, body.y, "█", Style::new().fg(theme().heat_color(t)));
-    }
-    put_str(buf, corner, x, body.y, if horizontal { " work" } else { "1" }, dim);
-
-    let now = app.now_ms;
-    grid.draw_lanes(buf, app, lanes, |lane, _, n| pts(lane, start, bucket, n, now));
-}
-
 #[cfg(test)]
 mod tests {
-    use super::super::ViewKind;
     use super::super::tests::{render, row, sample_app};
     use super::*;
+    use crate::model::Mark;
 
     #[test]
     fn cells_shade_by_working_share() {
         // Idle from 0, working 2000..5000, blocked from 5000; now 8500; 1 s buckets, now in the last
         // of 27 cells from column 33, so the lane opens at column 51.
-        let mut app = sample_app(ViewKind::Heat, Orient::Horizontal);
+        let mut app = sample_app(4, Orient::Horizontal);
         let buf = render(&mut app, 60, 3);
-        assert_eq!(row(&buf, 2, 51, 60), "█████████", "one cell per second up to now");
+        assert_eq!(row(&buf, 2, 51, 60), "▀▀▀▀▀▀▀▀▀", "one cell per second up to now");
         let fg = |i: u16| buf[(51 + i, 2)].fg;
         assert_eq!(fg(0), theme().heat_color(0.0), "idle");
         assert_eq!(fg(3), theme().heat_color(1.0), "working the whole second");
         assert_eq!(fg(6), theme().heat_blocked, "blocked");
+    }
+
+    #[test]
+    fn heat_paints_now_for_a_first_seen_working_lane() {
+        let mut app = sample_app(4, Orient::Horizontal);
+        let i = app.state.open("w1:p2", "w1", 8550, Mark::Seen, AgentStatus::Working, true);
+        app.state.lanes[i].agent = Some("omp".into());
+        app.state.assign_slots();
+        let buf = render(&mut app, 60, 4);
+        assert_eq!(buf[(59, 3)].symbol(), "▀");
+        assert_eq!(buf[(59, 3)].fg, theme().heat_color(1.0));
+    }
+
+    #[test]
+    fn vertical_cells_fill_the_column() {
+        let mut app = sample_app(4, Orient::Vertical);
+        let buf = render(&mut app, 15, 16);
+        // One lane: a 6-wide column from x 9, filled after its first cell; the last row is now.
+        assert_eq!(row(&buf, 15, 10, 15), "█████");
     }
 }
