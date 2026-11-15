@@ -1,14 +1,15 @@
 //! Agent sessions, whatever the agent: turns, model requests, tool spans and point events, built
 //! from the `Fact`s that per-agent decoders (omp, Claude Code, Codex) read out of session files.
 //! Text is never stored; `SourceRef`s point back into the file for reading it on demand.
-#![expect(dead_code, reason = "turn, span and event detail is read by the session timeline")]
 
 mod builder;
 mod claude;
 mod codex;
+pub mod index;
 mod omp;
 mod store;
 mod tail;
+pub mod text;
 
 use std::collections::HashMap;
 use std::path::PathBuf;

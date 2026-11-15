@@ -8,10 +8,13 @@ mod ctx;
 mod gutter;
 mod heat;
 mod help;
+mod inspect;
 mod keys;
 mod lanes;
+mod prompt;
 mod sequence;
 mod time;
+mod timeline;
 
 use std::collections::BTreeSet;
 
@@ -147,6 +150,13 @@ pub struct App {
     pub focus_requested: Option<String>,
     pub area_mode: AreaMode,
     pub sessions: Store,
+    /// Lane inspector: forced on or off, or None for on when there's room.
+    pub inspector: Option<bool>,
+    /// The inspector was drawn last frame; `i` flips what's on screen.
+    inspector_shown: bool,
+    /// One-line text input over the body's last row.
+    pub prompt: Option<prompt::Prompt>,
+    pub surface: timeline::Surface,
 }
 
 impl App {
@@ -182,6 +192,10 @@ impl App {
             focus_requested: None,
             area_mode: AreaMode::Stacked,
             sessions: Store::new(Roots::from_env()),
+            inspector: None,
+            inspector_shown: false,
+            prompt: None,
+            surface: timeline::Surface::Main,
         };
         app.preset(preset);
         app
@@ -468,6 +482,16 @@ fn time_ticks(start_ms: i64, cell_ms: f64, cells: usize, horizontal: bool) -> Ve
 
 fn fmt_bucket(s: i64) -> String {
     if s >= 60 { format!("{}m", s / 60) } else { format!("{s}s") }
+}
+
+/// `42s`, `3m`, `2h07`: a short span, for gaps and windows.
+fn fmt_short(ms: i64) -> String {
+    let s = ms.max(0) / 1000;
+    match s {
+        0..60 => format!("{s}s"),
+        60..3600 => format!("{}m", s / 60),
+        _ => format!("{}h{:02}", s / 3600, s % 3600 / 60),
+    }
 }
 
 /// `42s`, `3m05s`, `2h07m`.
@@ -768,6 +792,21 @@ fn header(app: &App, lanes: &[usize]) -> Vec<Seg> {
 
 pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
     let [header_area, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
+    let in_timeline = matches!(app.surface, timeline::Surface::Timeline(_));
+    if in_timeline {
+        timeline::draw(buf, header_area, body, app);
+    } else {
+        draw_main(buf, header_area, body, app);
+    }
+    if let Some(p) = &app.prompt {
+        prompt::draw(buf, body, p);
+    }
+    if app.help {
+        help::draw(buf, body, in_timeline);
+    }
+}
+
+fn draw_main(buf: &mut Buffer, header_area: Rect, body: Rect, app: &mut App) {
     let dim = Style::new().fg(theme().dim);
     let lanes = app.rows();
     if !app.steps() && app.follow {
@@ -775,6 +814,11 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
     }
     app.band_max = None;
     app.shown = (0, lanes.len(), 0);
+    let (body, inspector) = match inspect::place(app, body) {
+        Some((main, side, bottom)) => (main, Some((side, bottom))),
+        None => (body, None),
+    };
+    app.inspector_shown = inspector.is_some();
 
     // Closed lanes fold into one summary row at the bottom (USAGE has no rows to fold).
     let hidden = app.state.closed_hidden(&app.query);
@@ -794,11 +838,13 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
         let text = format!("▸ {hidden} closed in the last {}h — c shows them", HISTORY_MS / 3_600_000);
         put_str(buf, body, body.x, body.bottom() - 1, &text, dim);
     }
+    if let Some((area, bottom)) = inspector
+        && let Some(li) = app.sel_row(&lanes).map(|r| lanes[r])
+    {
+        inspect::draw(buf, area, bottom, app, li);
+    }
 
     chrome::draw_header(buf, header_area, header(app, &lanes));
-    if app.help {
-        help::draw(buf, body);
-    }
 }
 
 #[cfg(test)]

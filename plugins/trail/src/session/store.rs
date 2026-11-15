@@ -397,6 +397,15 @@ impl Store {
         out
     }
 
+    /// A built session attached as lane `lane_id`'s newest root.
+    #[cfg(test)]
+    pub fn insert_session(&mut self, lane_id: u64, session: Session) -> SessionIdx {
+        let (i, _) = self.ensure(session.path.clone(), session.source);
+        self.sessions[i] = session;
+        self.lanes.entry(lane_id).or_default().push(i);
+        i
+    }
+
     /// A synthetic omp session for lane `lane_id`: one main request per `(at_ms, ctx, cost)`.
     #[cfg(test)]
     pub fn insert_samples(&mut self, lane_id: u64, samples: &[(i64, u64, Option<f64>)]) {

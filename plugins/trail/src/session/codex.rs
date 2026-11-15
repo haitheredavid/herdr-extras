@@ -57,6 +57,7 @@ struct Payload {
     call_id: Option<String>,
     name: Option<String>,
     new_thread_id: Option<String>,
+    reason: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -115,7 +116,12 @@ impl Codex {
                 self.last_ts = ts;
             }
             "task_complete" => out.push(Fact::TurnEnd { at_ms: ts, outcome: Outcome::Completed }),
-            "turn_aborted" => out.push(Fact::TurnEnd { at_ms: ts, outcome: Outcome::Aborted }),
+            "turn_aborted" => {
+                if p.reason.as_deref() == Some("interrupted") {
+                    out.push(Fact::Point(Event { at_ms: ts, kind: EventKind::Interrupt }));
+                }
+                out.push(Fact::TurnEnd { at_ms: ts, outcome: Outcome::Aborted });
+            }
             "context_compacted" => {
                 out.push(Fact::Point(Event { at_ms: ts, kind: EventKind::Compaction { before: None, after: None } }));
             }

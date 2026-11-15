@@ -241,8 +241,14 @@ impl Claude {
         if u.is_meta == Some(true) {
             return;
         }
-        // Text starting with `<` is a command or reminder Claude Code injected, not something typed.
+        // Text starting with `<` is a command or reminder Claude Code injected, not something typed;
+        // `[Request interrupted by user…]` is Claude Code noting an Esc.
         let Some(text) = user_text(content).filter(|t| !t.trim_start().starts_with('<')) else { return };
+        if text.starts_with("[Request interrupted by user") {
+            out.push(Fact::Point(Event { at_ms: ts, kind: EventKind::Interrupt }));
+            out.push(Fact::TurnEnd { at_ms: ts, outcome: Outcome::Aborted });
+            return;
+        }
         out.push(Fact::Prompt { at_ms: ts, trigger: Trigger::User, chars: text.chars().count() as u32, src });
     }
 
@@ -351,6 +357,13 @@ mod tests {
             r#"{"type":"user","timestamp":"2026-11-15T01:03:00.000Z","message":{"content":"<command-name>/clear</command-name>"}}"#,
         ]);
         assert!(s.turns.is_empty());
+        let s = decode_all(&[
+            PROMPT,
+            r#"{"type":"user","timestamp":"2026-11-15T01:03:09.000Z","message":{"content":[{"type":"text","text":"[Request interrupted by user]"}]}}"#,
+        ]);
+        assert_eq!(s.turns.len(), 1, "an interrupt isn't a prompt");
+        assert_eq!(s.turns[0].outcome, Outcome::Aborted);
+        assert_eq!(s.events.iter().filter(|e| e.kind == EventKind::Interrupt).count(), 1);
         assert!(!Claude::default().wants(br#"{"type":"api-request-blob","id":"x"}"#));
     }
 }

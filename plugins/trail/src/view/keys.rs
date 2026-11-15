@@ -3,6 +3,8 @@
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 
+use super::prompt::PromptKind;
+use super::timeline::{self, Surface};
 use super::{App, AreaMode, Axis, BUCKETS_S, Density, Lens, Mode, Orient, sequence};
 
 impl App {
@@ -13,6 +15,27 @@ impl App {
                 KeyCode::Char('q') => self.quit = true,
                 _ => {}
             }
+            return;
+        }
+        if let Some(p) = &mut self.prompt {
+            match key.code {
+                KeyCode::Char(c) => p.text.push(c),
+                KeyCode::Backspace => {
+                    p.text.pop();
+                }
+                KeyCode::Esc => self.prompt = None,
+                KeyCode::Enter => {
+                    let p = self.prompt.take().expect("checked above");
+                    match p.kind {
+                        PromptKind::JumpTool => timeline::accept_tool(self, p.text),
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+        if matches!(self.surface, Surface::Timeline(_)) {
+            timeline::on_key(self, key);
             return;
         }
         let rows = self.orient == Orient::Horizontal;
@@ -30,6 +53,8 @@ impl App {
             KeyCode::PageUp => self.move_selection(-(self.shown.1.max(1) as isize)),
             KeyCode::Home => self.move_selection(isize::MIN / 2),
             KeyCode::End => self.move_selection(isize::MAX / 2),
+            KeyCode::Char('i') => self.inspector = Some(!self.inspector_shown),
+            KeyCode::Char('I') => timeline::open(self),
             KeyCode::Char('h') => self.scroll_time(true, false),
             KeyCode::Char('l') => self.scroll_time(false, false),
             KeyCode::Char('H') => self.scroll_time(true, true),
