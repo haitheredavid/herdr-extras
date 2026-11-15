@@ -1,6 +1,8 @@
 //! Codex rollout files (`~/.codex/sessions/YYYY/MM/DD/rollout-…-<id>.jsonl`): every line is
 //! `{timestamp, type, payload}`. A request is a change in the running token total; tool calls are
-//! `response_item` function or custom tool calls. Codex records no dollars.
+//! `response_item` function or custom tool calls. A prompt is a `user_message` event in older
+//! rollouts and an `item_completed` `UserMessage` in newer ones (a file has one or the other).
+//! Codex records no dollars.
 
 use serde::Deserialize;
 use serde_json::value::RawValue;
@@ -10,13 +12,14 @@ use super::{
     tool_cat,
 };
 
-const WANTED: [&[u8]; 12] = [
+const WANTED: [&[u8]; 13] = [
     br#""type":"session_meta""#,
     br#""type":"turn_context""#,
     br#""type":"token_count""#,
     br#""type":"task_started""#,
     br#""type":"task_complete""#,
     br#""type":"user_message""#,
+    br#""type":"UserMessage""#,
     br#""type":"turn_aborted""#,
     br#""type":"context_compacted""#,
     br#""type":"error""#,
@@ -58,6 +61,22 @@ struct Payload {
     name: Option<String>,
     new_thread_id: Option<String>,
     reason: Option<String>,
+    item: Option<Item>,
+}
+
+/// An `item_completed` item; only `UserMessage` is read.
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct Item {
+    #[serde(rename = "type")]
+    ty: String,
+    content: Vec<TextPart>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct TextPart {
+    text: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -86,6 +105,11 @@ impl Codex {
             "user_message" => {
                 let chars = p.message.as_deref().map_or(0, |m| m.chars().count()) as u32;
                 out.push(Fact::Prompt { at_ms: ts, trigger: Trigger::User, chars, src });
+            }
+            "item_completed" => {
+                let Some(item) = p.item.filter(|i| i.ty == "UserMessage") else { return };
+                let chars = item.content.iter().filter_map(|t| t.text.as_deref()).map(|t| t.chars().count()).sum::<usize>();
+                out.push(Fact::Prompt { at_ms: ts, trigger: Trigger::User, chars: chars as u32, src });
             }
             "token_count" => {
                 let Some(info) = p.info else { return };
@@ -223,5 +247,15 @@ mod tests {
         assert_eq!(s.turns.len(), 1);
         assert_eq!(s.turns[0].outcome, Outcome::Completed);
         assert_eq!(s.id.as_deref(), Some("01a1"));
+    }
+
+    #[test]
+    fn newer_rollouts_prompt_through_user_message_items() {
+        const ITEM: &str = r#"{"timestamp":"2026-11-15T15:54:56.437Z","type":"event_msg","payload":{"type":"item_completed","thread_id":"t1","turn_id":"u1","item":{"type":"UserMessage","id":"m1","content":[{"type":"text","text":"Read the repo","text_elements":[]}]}}}"#;
+        const AGENT: &str = r#"{"timestamp":"2026-11-15T15:54:59.000Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","id":"m2"}}}"#;
+        let s = decode_all(&[META, STARTED, ITEM, AGENT, TOKENS, DONE]);
+        assert_eq!(s.turns.len(), 1);
+        assert_eq!((s.turns[0].trigger, s.turns[0].prompt_chars), (Trigger::User, 13));
+        assert!(s.turns[0].prompt.is_some());
     }
 }

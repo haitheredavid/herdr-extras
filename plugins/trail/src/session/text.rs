@@ -53,7 +53,11 @@ pub fn prompt_text(s: &Session, src: SourceRef) -> Option<String> {
     let v = line_at(s, src)?;
     let text = match s.source {
         Source::Omp | Source::Claude => content_text(v.pointer("/message/content")?)?,
-        Source::Codex => v.pointer("/payload/message")?.as_str()?.to_string(),
+        // Older rollouts: an `event_msg` `user_message`; newer: an `item_completed` `UserMessage`.
+        Source::Codex => match v.pointer("/payload/message").and_then(Value::as_str) {
+            Some(m) => m.to_string(),
+            None => content_text(v.pointer("/payload/item/content")?)?,
+        },
     };
     first_line(&text)
 }
@@ -80,6 +84,21 @@ mod tests {
         assert_eq!(prompt_text(&s, at(head.len() + 1, USER)).as_deref(), Some("fix the login"));
         let intent = at(head.len() + 1 + USER.len() + 1, TOOL_START);
         assert_eq!(intent_text(&s, intent).as_deref(), Some("Dispatching a reviewer"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn codex_prompt_text_reads_both_rollout_forms() {
+        let dir = std::env::temp_dir().join(format!("herdr-trail-codex-text-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("r.jsonl");
+        let old = r#"{"type":"event_msg","payload":{"type":"user_message","message":"list files"}}"#;
+        let new = r#"{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","content":[{"type":"text","text":"Read the repo"}]}}}"#;
+        std::fs::write(&path, format!("{old}\n{new}\n")).unwrap();
+        let s = Session::new(Source::Codex, path);
+        let at = |offset: usize, line: &str| SourceRef { session: 0, offset: offset as u64, len: line.len() as u32 };
+        assert_eq!(prompt_text(&s, at(0, old)).as_deref(), Some("list files"));
+        assert_eq!(prompt_text(&s, at(old.len() + 1, new)).as_deref(), Some("Read the repo"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
