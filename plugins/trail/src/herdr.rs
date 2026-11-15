@@ -15,6 +15,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::model::{AgentStatus, HostEvent, PaneMeta};
+use crate::session::{RefKind, SessionRef};
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct Snapshot {
@@ -60,9 +61,24 @@ pub struct PaneInfo {
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct AgentSession {
     #[serde(default)]
+    pub agent: String,
+    #[serde(default)]
     pub kind: String,
     #[serde(default)]
     pub value: String,
+}
+
+impl AgentSession {
+    /// The ref, when `kind` is one trail knows and `value` is set; `agent` falls back to the pane's.
+    fn session_ref(&self, pane_agent: Option<&str>) -> Option<SessionRef> {
+        let kind = match self.kind.as_str() {
+            "id" => RefKind::Id,
+            "path" => RefKind::Path,
+            _ => return None,
+        };
+        let agent = if self.agent.is_empty() { pane_agent.unwrap_or_default().to_string() } else { self.agent.clone() };
+        (!self.value.is_empty()).then(|| SessionRef { agent, kind, value: self.value.clone() })
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -130,11 +146,7 @@ impl From<&PaneInfo> for PaneMeta {
             terminal_title: p.terminal_title.clone(),
             cwd: p.cwd.clone(),
             status: Some(p.agent_status),
-            session: p
-                .agent_session
-                .as_ref()
-                .filter(|s| s.kind == "path" && !s.value.is_empty())
-                .map(|s| PathBuf::from(&s.value)),
+            session: p.agent_session.as_ref().and_then(|s| s.session_ref(p.agent.as_deref())),
             ..PaneMeta::default()
         }
     }

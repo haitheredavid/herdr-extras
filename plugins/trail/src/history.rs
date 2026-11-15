@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::herdr::PLUGIN_ID;
 use crate::model::{AgentStatus, HostEvent, PaneMeta};
+use crate::session::SessionRef;
 
 /// One line of the history log, written by `herdr-trail record`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -29,6 +30,15 @@ pub struct LogEvent {
     pub agent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<AgentStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_session: Option<SessionRef>,
+    /// `pane.moved`: the id the pane had before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_pane_id: Option<String>,
 }
 
 impl LogEvent {
@@ -38,10 +48,13 @@ impl LogEvent {
             pane_id: self.pane_id.clone(),
             workspace_id: self.workspace_id.clone(),
             workspace_label: self.workspace_label.clone(),
+            tab_id: self.tab_id.clone(),
             tab_label: self.tab_label.clone(),
+            terminal_id: self.terminal_id.clone(),
             cwd: self.cwd.clone(),
             agent: self.agent.clone(),
             status: self.status,
+            session: self.agent_session.clone(),
             ..PaneMeta::default()
         };
         Some(match self.event.as_str() {
@@ -50,6 +63,7 @@ impl LogEvent {
             "pane.agent_status_changed" if self.status.is_some() => HostEvent::Status(meta),
             "pane.closed" => HostEvent::Closed { pane_id: meta.pane_id },
             "pane.exited" => HostEvent::Exited { pane_id: meta.pane_id },
+            "pane.moved" => HostEvent::Moved { previous_pane_id: self.previous_pane_id.clone()?, pane: meta },
             _ => return None,
         })
     }

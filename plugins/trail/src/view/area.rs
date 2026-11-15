@@ -10,8 +10,8 @@ use ratatui::style::{Color, Modifier, Style};
 use super::time::start_ms;
 use super::{App, AreaMode, Orient, put_str, time_ticks, truncate};
 use crate::model::{HISTORY_MS, Lane};
+use crate::session::{Store, fmt_tokens};
 use crate::theme::{mix, theme};
-use crate::usage::{Tracker, fmt_tokens};
 
 /// ↕ time-axis gutter: `HH:MM:SS` plus a space.
 const AXIS_W: u16 = 9;
@@ -130,7 +130,7 @@ fn time_frame(app: &App, lanes: &[usize], t_dots: usize, dots_per_cell: usize) -
             .iter()
             .map(|&i| {
                 let l = &app.state.lanes[i];
-                app.usage.first_at(&l.sessions).map_or(l.opened_ms, |f| f.min(l.opened_ms))
+                app.sessions.first_at(l).map_or(l.opened_ms, |f| f.min(l.opened_ms))
             })
             .min()
             .unwrap_or(now)
@@ -161,11 +161,12 @@ fn trace(canvas: &mut Canvas, plot: &Plot, pts: &[Option<(usize, Color)>]) {
     }
 }
 
-fn value_at(lane: &Lane, usage: &Tracker, at: i64) -> Option<u64> {
-    if lane.closed_ms.is_some_and(|c| at >= c) {
+/// Context of `lane` at `at`; None outside its life.
+fn value_at(lane: &Lane, store: &Store, at: i64) -> Option<u64> {
+    if at < lane.opened_ms || lane.closed_ms.is_some_and(|c| at >= c) {
         return None;
     }
-    usage.ctx_at(&lane.sessions, at)
+    store.ctx_at(lane, at)
 }
 
 pub fn render(buf: &mut Buffer, body: Rect, app: &mut App, lanes: &[usize]) {
@@ -197,7 +198,7 @@ pub fn render(buf: &mut Buffer, body: Rect, app: &mut App, lanes: &[usize]) {
             let vals = (0..t_dots)
                 .map(|j| {
                     let t0 = start + j as i64 * dot_ms;
-                    (t0 <= now).then(|| value_at(lane, &app.usage, (t0 + dot_ms - 1).min(now))).flatten()
+                    (t0 <= now).then(|| value_at(lane, &app.sessions, (t0 + dot_ms - 1).min(now))).flatten()
                 })
                 .collect();
             Series { k, slot: lane.slot.unwrap_or(0), vals }
@@ -355,6 +356,22 @@ pub fn render(buf: &mut Buffer, body: Rect, app: &mut App, lanes: &[usize]) {
             }
         }
     }
+    // A `⇣` on the time axis wherever an agent's context was compacted.
+    let cell_ms = dot_ms * dots_per_cell as i64;
+    for &li in lanes {
+        let lane = &app.state.lanes[li];
+        let color = Style::new().fg(theme().agent_color(lane.slot.unwrap_or(0)));
+        for (at, _, _) in app.sessions.compactions(lane) {
+            if at < start || at >= start + cells as i64 * cell_ms {
+                continue;
+            }
+            let c = ((at - start) / cell_ms) as u16;
+            match plot.orient {
+                Orient::Horizontal => put_str(buf, body, plot.area.x + c, body.bottom() - 1, "⇣", color),
+                Orient::Vertical => put_str(buf, body, body.x + AXIS_W - 1, plot.area.y + c, "⇣", color),
+            };
+        }
+    }
 
     // End labels at each line's last point.
     let last_t = (0..t_dots).rev().find(|&t| bands.iter().any(|b| b[t].is_some()));
@@ -411,9 +428,7 @@ mod tests {
     use super::super::tests::{render, sample_app};
     use super::*;
     use crate::model::{AgentStatus, Mark};
-    use crate::usage::Sample;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use std::path::PathBuf;
 
     /// Lane 0 at 100 tokens and lane 1 at 300, both from 0 ms; `now_ms = 8500`.
     fn two_series(orient: Orient) -> App {
@@ -422,9 +437,8 @@ mod tests {
         app.state.lanes[i].agent = Some("claude".into());
         app.state.assign_slots();
         for (li, ctx) in [(0, 100), (i, 300)] {
-            let path = PathBuf::from(format!("/s{li}.jsonl"));
-            app.state.lanes[li].sessions.push(path.clone());
-            app.usage.insert(path, vec![Sample { at_ms: 0, ctx, cost: 0.0 }]);
+            let id = app.state.lanes[li].id;
+            app.sessions.insert_samples(id, &[(0, ctx, None)]);
         }
         app
     }

@@ -7,8 +7,8 @@ use ratatui::style::Style;
 use super::gutter::Cols;
 use super::{App, Cell, Grid, Orient, Pt, Scale, head_cell, line_cell, node_cell, put_str, time_ticks};
 use crate::model::{Lane, status_at};
+use crate::session::Store;
 use crate::theme::theme;
-use crate::usage::Tracker;
 
 /// ↕ axis gutter: `HH:MM` ticks when they're a minute or more apart, else `HH:MM:SS`, plus a space.
 pub(super) fn axis_w(bucket_ms: i64) -> u16 {
@@ -46,7 +46,7 @@ fn cell(lane: &Lane, t0: i64, t1: i64, now_ms: i64, orient: Orient) -> Cell {
 
 /// Cells for `lane`, each at the context in use at the end of its bucket (or now).
 #[allow(clippy::too_many_arguments)]
-fn pts(lane: &Lane, usage: &Tracker, scale: Scale, start: i64, bucket: i64, n: usize, now_ms: i64, orient: Orient) -> Vec<Pt> {
+fn pts(lane: &Lane, usage: &Store, scale: Scale, start: i64, bucket: i64, n: usize, now_ms: i64, orient: Orient) -> Vec<Pt> {
     (0..n)
         .map(|i| {
             let t0 = start + i as i64 * bucket;
@@ -54,7 +54,7 @@ fn pts(lane: &Lane, usage: &Tracker, scale: Scale, start: i64, bucket: i64, n: u
             let at = (t1 - 1).min(now_ms);
             Pt {
                 cell: cell(lane, t0, t1, now_ms, orient),
-                level: scale.level(usage.ctx_at(&lane.sessions, at)),
+                level: scale.level(usage.ctx_at(lane, at)),
                 status: status_at(lane, at),
             }
         })
@@ -132,11 +132,9 @@ mod tests {
 
     /// Context 100 from the start, 400 from 4000 ms: the line bends up a level per cell of band.
     fn with_usage(orient: Orient) -> crate::view::App {
-        use crate::usage::Sample;
         let mut app = sample_app(ViewKind::Time, orient);
-        let path = std::path::PathBuf::from("/s.jsonl");
-        app.state.lanes[0].sessions.push(path.clone());
-        app.usage.insert(path, vec![Sample { at_ms: 0, ctx: 100, cost: 0.25 }, Sample { at_ms: 4000, ctx: 400, cost: 0.5 }]);
+        let id = app.state.lanes[0].id;
+        app.sessions.insert_samples(id, &[(0, 100, Some(0.25)), (4000, 400, Some(0.5))]);
         app
     }
 

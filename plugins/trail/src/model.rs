@@ -2,11 +2,11 @@
 //! log, snapshots and live events through one `HostEvent` fold.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
 use crate::herdr::Snapshot;
+use crate::session::SessionRef;
 
 /// Log window loaded at start; closed lanes older than this are pruned.
 pub const HISTORY_MS: i64 = 2 * 3600 * 1000;
@@ -63,8 +63,8 @@ pub struct PaneMeta {
     pub terminal_title: Option<String>,
     pub cwd: Option<String>,
     pub status: Option<AgentStatus>,
-    /// Agent session file herdr reports for the pane (`kind == "path"` only).
-    pub session: Option<PathBuf>,
+    /// Agent session herdr reports for the pane.
+    pub session: Option<SessionRef>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -154,8 +154,8 @@ pub struct Lane {
     pub live: bool,
     /// First is Seen|Created; Status steps only on change; Closed|Exited last.
     pub steps: Vec<Step>,
-    /// Agent session files seen for this pane, oldest first; usage history comes from these.
-    pub sessions: Vec<PathBuf>,
+    /// Agent sessions seen for this pane, oldest first; usage history comes from these.
+    pub sessions: Vec<SessionRef>,
 }
 
 impl Lane {
@@ -293,6 +293,19 @@ impl State {
             Some(i) => i,
             None => self.open(pane_id, workspace_id, at_ms, Mark::Seen, status, live),
         }
+    }
+
+    /// Moves a first-seen lane's start back to `t_ms`, when its agent's session shows it was
+    /// already running: the time before the panel saw it reads as unknown, not as its first status.
+    pub fn backdate(&mut self, idx: usize, t_ms: i64) {
+        let lane = &mut self.lanes[idx];
+        if lane.steps.first().is_none_or(|s| s.mark != Mark::Seen) || t_ms >= lane.opened_ms {
+            return;
+        }
+        let first = &mut lane.steps[0];
+        first.mark = Mark::Status(first.status);
+        lane.steps.insert(0, Step { at_ms: t_ms, mark: Mark::Seen, status: AgentStatus::Unknown });
+        lane.opened_ms = t_ms;
     }
 
     pub fn set_status(&mut self, idx: usize, status: AgentStatus, at_ms: i64) {
@@ -505,6 +518,7 @@ mod tests {
     use super::*;
     use crate::herdr::{Envelope, host_event};
     use crate::history::LogEvent;
+    use crate::session::RefKind;
     use serde_json::json;
 
     fn log(ts_ms: i64, event: &str, pane_id: &str, status: Option<AgentStatus>) -> LogEvent {
@@ -519,6 +533,10 @@ mod tests {
             cwd: None,
             agent: Some("omp".into()),
             status,
+            tab_id: None,
+            terminal_id: None,
+            agent_session: None,
+            previous_pane_id: None,
         }
     }
 
@@ -594,7 +612,8 @@ mod tests {
         assert!(p3.live && p3.is_open());
         assert_eq!(p3.steps.last().unwrap(), &Step { at_ms: 1000, mark: Mark::Status(Working), status: Working });
         assert_eq!(p3.label(), "fix login");
-        assert_eq!(p3.sessions, [PathBuf::from("/s/a.jsonl")]);
+        let r = SessionRef { agent: "omp".into(), kind: RefKind::Path, value: "/s/a.jsonl".into() };
+        assert_eq!(p3.sessions, [r]);
         assert_eq!(s.tab_label(i3), Some("main"));
         assert_eq!(s.protocol, Some(22));
         assert_eq!(s.open_live_ids().into_iter().collect::<Vec<_>>(), ["p2", "p3"]);

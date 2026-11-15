@@ -10,8 +10,8 @@ use ratatui::style::{Modifier, Style};
 
 use super::{App, fmt_dur, hm, put_str, status_glyph, truncate};
 use crate::model::{AgentStatus, HISTORY_MS, State, status_time};
+use crate::session::fmt_tokens;
 use crate::theme::theme;
-use crate::usage::fmt_tokens;
 
 /// Narrowest strip worth keeping right-hand columns for.
 const MIN_STRIP: u16 = 24;
@@ -140,12 +140,11 @@ pub(super) fn draw_row(
     }
 
     let from = now - HISTORY_MS;
-    let has_usage = app.usage.has_samples(&lane.sessions);
-    let (reqs, cost) = app.usage.spend_between(&lane.sessions, from, now);
-    let cost = has_usage.then_some(cost);
+    let spend = app.sessions.spend_between(lane, from, now);
+    let cost = spend.cost;
     let mut rx = body.right().saturating_sub(cols.right());
     if cols.ctx {
-        let ctx = app.usage.ctx_at(&lane.sessions, end).map_or("–".into(), fmt_tokens);
+        let ctx = app.sessions.ctx_at(lane, end).map_or("–".into(), fmt_tokens);
         rx = put_str(buf, body, rx, y, &format!(" {ctx:>5}"), Style::new());
     }
     if cols.cost {
@@ -158,12 +157,12 @@ pub(super) fn draw_row(
     }
 
     if rows > 1 {
-        let ctx = app.usage.ctx_at(&lane.sessions, end).map_or("–".into(), fmt_tokens);
-        let peak = app.usage.max_between(&lane.sessions, lane.opened_ms, end).map_or("–".into(), fmt_tokens);
+        let ctx = app.sessions.ctx_at(lane, end).map_or("–".into(), fmt_tokens);
+        let peak = app.sessions.max_between(lane, lane.opened_ms, end).map_or("–".into(), fmt_tokens);
         let tab = app.state.tab_label(li).map(|t| format!(" · tab {t}")).unwrap_or_default();
         let detail = [
             format!("ctx {ctx} · peak {peak}"),
-            if has_usage { format!("{} · {reqs} reqs", fmt_cost(cost)) } else { "no usage".into() },
+            if spend.requests > 0 { format!("{} · {} reqs", fmt_cost(cost), spend.requests) } else { "no usage".into() },
             format!("{}{tab} · {}", lane.agent.as_deref().unwrap_or("-"), lane.pane_id),
         ];
         let w = cols.left().saturating_sub(4) as usize;

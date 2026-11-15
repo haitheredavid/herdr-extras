@@ -18,8 +18,8 @@ use ratatui::text::Span;
 
 use crate::config::config_problems;
 use crate::model::{AgentStatus, HISTORY_MS, Lane, Mark, Query, State};
+use crate::session::{Roots, Store, fmt_tokens};
 use crate::theme::{theme, theme_problems};
-use crate::usage::{Tracker, fmt_tokens};
 use chrome::Seg;
 use gutter::{Cols, display_labels};
 
@@ -155,7 +155,7 @@ pub struct App {
     /// Draw lanes as usage bands when any lane has usage.
     pub bands: bool,
     pub area_mode: AreaMode,
-    pub usage: Tracker,
+    pub sessions: Store,
 }
 
 impl App {
@@ -187,14 +187,25 @@ impl App {
             focus_requested: None,
             bands: true,
             area_mode: AreaMode::Stacked,
-            usage: Tracker::default(),
+            sessions: Store::new(Roots::from_env()),
         }
     }
 
-    /// Reads new usage from every lane's agent session files.
+    /// Reads new usage from every lane's agent sessions (at most once a second), and backdates
+    /// first-seen lanes to when their session shows the agent started.
     pub fn refresh_usage(&mut self) {
-        let App { state, usage, .. } = self;
-        usage.refresh(state.lanes.iter().flat_map(|l| &l.sessions));
+        self.sessions.refresh(&self.state.lanes, self.now_ms);
+        let since = self.now_ms - HISTORY_MS;
+        let early: Vec<(usize, i64)> = (0..self.state.lanes.len())
+            .filter_map(|i| {
+                let lane = &self.state.lanes[i];
+                let first = self.sessions.first_at(lane)?;
+                (first < lane.opened_ms && first >= since).then_some((i, first))
+            })
+            .collect();
+        for (i, t) in early {
+            self.state.backdate(i, t);
+        }
     }
 
     fn bucket_ms(&self) -> i64 {
@@ -415,7 +426,7 @@ impl Scale {
             .iter()
             .filter_map(|&i| {
                 let l = &app.state.lanes[i];
-                app.usage.max_between(&l.sessions, l.opened_ms, l.closed_ms.unwrap_or(app.now_ms))
+                app.sessions.max_between(l, l.opened_ms, l.closed_ms.unwrap_or(app.now_ms))
             })
             .max()
             .unwrap_or(0);
@@ -634,7 +645,7 @@ impl Grid {
     /// Draws each lane's gutter (↔) or column header (↕) and its line, scrolling so the selected
     /// lane stays in view. Where the level changes between cells, the line bends across the band
     /// in the new cell.
-    fn draw_lanes(&self, buf: &mut Buffer, app: &mut App, lanes: &[usize], pts: impl Fn(&Lane, &Tracker, usize) -> Vec<Pt>) {
+    fn draw_lanes(&self, buf: &mut Buffer, app: &mut App, lanes: &[usize], pts: impl Fn(&Lane, &Store, usize) -> Vec<Pt>) {
         let slots = self.slots();
         let sel = app.sel_row(lanes);
         let s = sel.unwrap_or(0);
@@ -679,7 +690,7 @@ impl Grid {
             }
             // Lines, bends, nodes and the head all take status colors.
             let mut prev: Option<u8> = None;
-            for (i, pt) in pts(lane, &app.usage, n).into_iter().enumerate().take(n) {
+            for (i, pt) in pts(lane, &app.sessions, n).into_iter().enumerate().take(n) {
                 let Some((mut ch, mut color)) = pt.cell else {
                     prev = None;
                     continue;

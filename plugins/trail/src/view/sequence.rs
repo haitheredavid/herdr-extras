@@ -6,15 +6,15 @@ use ratatui::layout::Rect;
 
 use super::{App, Grid, Orient, Pt, Scale, head_cell, line_cell, node_glyph};
 use crate::model::Lane;
+use crate::session::Store;
 use crate::theme::theme;
-use crate::usage::Tracker;
 
 /// Cells per step: the node, then connectors in the status it set.
 const STEP_W: usize = 4;
 const STEP_H: usize = 2;
 
 /// Step k's node and connectors sit at the context in use when it happened; the head at now's.
-fn pts(lane: &Lane, usage: &Tracker, scale: Scale, now_ms: i64, n: usize, seq_back: usize, orient: Orient) -> Vec<Pt> {
+fn pts(lane: &Lane, usage: &Store, scale: Scale, now_ms: i64, n: usize, seq_back: usize, orient: Orient) -> Vec<Pt> {
     let step = match orient {
         Orient::Horizontal => STEP_W,
         Orient::Vertical => STEP_H,
@@ -31,7 +31,7 @@ fn pts(lane: &Lane, usage: &Tracker, scale: Scale, now_ms: i64, n: usize, seq_ba
     let need = |s: usize| (s..end).map(width).sum::<usize>() + usize::from(head) + usize::from(s > 0);
     let first = (0..end).find(|&s| need(s) <= n).unwrap_or(end - 1);
 
-    let level_at = |t_ms: i64| scale.level(usage.ctx_at(&lane.sessions, t_ms));
+    let level_at = |t_ms: i64| scale.level(usage.ctx_at(lane, t_ms));
     let mut out: Vec<Pt> = Vec::with_capacity(n);
     if first > 0 {
         let s = &lane.steps[first];

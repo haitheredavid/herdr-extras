@@ -1,14 +1,15 @@
 //! `herdr-trail record`: the herdr `[[events]]` hook. Appends one JSON line per pane event to the
-//! monthly history log so the track keeps its nodes across restarts.
+//! monthly history log so the trail keeps its nodes, sessions and pane moves across restarts.
 
 use std::fs::OpenOptions;
 use std::io::Write;
 
 use anyhow::Context;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::history::{LogEvent, log_dir, log_file, session_name};
 use crate::model::AgentStatus;
+use crate::session::SessionRef;
 
 pub fn run() -> anyhow::Result<()> {
     let payload = env_json("HERDR_PLUGIN_EVENT_JSON");
@@ -19,10 +20,21 @@ pub fn run() -> anyhow::Result<()> {
         .or_else(|| payload.get("event").and_then(Value::as_str).map(dotted))
         .unwrap_or_default();
     let ts_ms = chrono::Utc::now().timestamp_millis();
-    let Some(record) = event_from(&event, &payload, &context, &session_name(), ts_ms) else {
+    let Some(mut record) = event_from(&event, &payload, &context, &session_name(), ts_ms) else {
         eprintln!("herdr-trail record: {event:?} payload has no pane_id; skipped");
         return Ok(());
     };
+    // Status payloads carry no pane record; ask herdr for the session so a history lane can find
+    // its usage without a live snapshot.
+    if record.agent_session.is_none()
+        && matches!(event.as_str(), "pane.agent_status_changed" | "pane.agent_detected")
+        && let Ok(result) = crate::herdr::request("pane.get", json!({ "pane_id": record.pane_id }))
+    {
+        let pane = result.get("pane").unwrap_or(&Value::Null);
+        record.agent_session = session_of(pane, record.agent.as_deref());
+        record.terminal_id = record.terminal_id.or_else(|| str_at(pane, "terminal_id"));
+        record.tab_id = record.tab_id.or_else(|| str_at(pane, "tab_id"));
+    }
     let dir = log_dir();
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     let path = log_file(&dir, ts_ms);
@@ -49,6 +61,15 @@ fn str_at(v: &Value, key: &str) -> Option<String> {
     v.get(key)?.as_str().filter(|s| !s.is_empty()).map(str::to_string)
 }
 
+/// `pane.agent_session`, with its agent falling back to the pane's.
+fn session_of(pane: &Value, agent: Option<&str>) -> Option<SessionRef> {
+    let mut r = serde_json::from_value::<SessionRef>(pane.get("agent_session")?.clone()).ok().filter(|r| !r.value.is_empty())?;
+    if r.agent.is_empty() {
+        r.agent = agent.unwrap_or_default().to_string();
+    }
+    Some(r)
+}
+
 /// Log record for a hook payload; None when it names no pane. Context labels are only taken when
 /// the context is about the event's workspace (and pane or tab), so events from background
 /// workspaces don't pick up the focused one's labels.
@@ -62,8 +83,9 @@ fn event_from(event: &str, payload: &Value, context: &Value, session: &str, ts_m
     let ctx_workspace = str_at(context, "workspace_id");
     let focused = str_at(context, "focused_pane_id").as_deref() == Some(pane_id.as_str());
     let same_workspace = workspace_id.is_empty() || ctx_workspace.as_deref().is_none_or(|w| w == workspace_id);
-    let same_tab = match (field("tab_id"), str_at(context, "tab_id")) {
-        (Some(pane_tab), Some(ctx_tab)) => pane_tab == ctx_tab,
+    let tab_id = field("tab_id");
+    let same_tab = match (&tab_id, str_at(context, "tab_id")) {
+        (Some(pane_tab), Some(ctx_tab)) => *pane_tab == ctx_tab,
         _ => focused,
     };
 
@@ -72,6 +94,7 @@ fn event_from(event: &str, payload: &Value, context: &Value, session: &str, ts_m
         .or_else(|| focused.then(|| str_at(context, "focused_pane_cwd")).flatten())
         .or_else(|| same_workspace.then(|| str_at(context, "workspace_cwd")).flatten());
     let status = field("agent_status").and_then(|s| serde_json::from_value::<AgentStatus>(Value::String(s)).ok());
+    let agent = field("agent");
 
     Some(LogEvent {
         ts_ms,
@@ -80,8 +103,12 @@ fn event_from(event: &str, payload: &Value, context: &Value, session: &str, ts_m
         workspace_label: same_workspace.then(|| str_at(context, "workspace_label")).flatten(),
         tab_label: (same_workspace && same_tab).then(|| str_at(context, "tab_label")).flatten(),
         cwd,
-        agent: field("agent"),
+        agent_session: session_of(pane, agent.as_deref()),
+        agent,
         status,
+        tab_id,
+        terminal_id: field("terminal_id"),
+        previous_pane_id: str_at(data, "previous_pane_id"),
         pane_id,
         workspace_id,
     })
@@ -90,6 +117,7 @@ fn event_from(event: &str, payload: &Value, context: &Value, session: &str, ts_m
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::RefKind;
     use serde_json::json;
 
     fn context() -> Value {
@@ -102,8 +130,9 @@ mod tests {
     #[test]
     fn pane_created_reads_nested_pane() {
         let payload = json!({"event": "pane_created", "data": {"pane": {
-            "pane_id": "w1:p3", "workspace_id": "w1", "tab_id": "w1:t1", "cwd": "/repo",
+            "pane_id": "w1:p3", "workspace_id": "w1", "tab_id": "w1:t1", "terminal_id": "term_1", "cwd": "/repo",
             "foreground_cwd": "/repo/sub", "agent_status": "working", "agent": "omp",
+            "agent_session": {"agent": "omp", "kind": "path", "source": "herdr:omp", "value": "/s/a.jsonl"},
         }}});
         let e = event_from("pane.created", &payload, &context(), "main", 42).unwrap();
         assert_eq!(
@@ -119,8 +148,28 @@ mod tests {
                 cwd: Some("/repo/sub".into()),
                 agent: Some("omp".into()),
                 status: Some(AgentStatus::Working),
+                tab_id: Some("w1:t1".into()),
+                terminal_id: Some("term_1".into()),
+                agent_session: Some(SessionRef { agent: "omp".into(), kind: RefKind::Path, value: "/s/a.jsonl".into() }),
+                previous_pane_id: None,
             }
         );
+    }
+
+    #[test]
+    fn moved_keeps_the_previous_pane_id() {
+        let payload = json!({"data": {"previous_pane_id": "w1:p3", "pane": {"pane_id": "w2:p1", "workspace_id": "w2", "terminal_id": "term_1"}}});
+        let e = event_from("pane.moved", &payload, &Value::Null, "default", 9).unwrap();
+        assert_eq!((e.pane_id.as_str(), e.previous_pane_id.as_deref()), ("w2:p1", Some("w1:p3")));
+        assert_eq!(e.terminal_id.as_deref(), Some("term_1"));
+    }
+
+    #[test]
+    fn session_agent_falls_back_to_the_panes() {
+        let pane = json!({"agent_session": {"kind": "id", "value": "abc"}});
+        let r = session_of(&pane, Some("claude")).unwrap();
+        assert_eq!((r.agent.as_str(), r.kind), ("claude", RefKind::Id));
+        assert_eq!(session_of(&json!({"agent_session": {"kind": "weird", "value": "x"}}), None), None);
     }
 
     #[test]

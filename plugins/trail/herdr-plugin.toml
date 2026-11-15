@@ -53,6 +53,10 @@ command = ["target/release/herdr-trail", "record"]
 on = "pane.exited"
 command = ["target/release/herdr-trail", "record"]
 
+[[events]]
+on = "pane.moved"
+command = ["target/release/herdr-trail", "record"]
+
 # Pin: the band follows focus into whichever workspace/tab you switch to.
 [[events]]
 on = "workspace.focused"

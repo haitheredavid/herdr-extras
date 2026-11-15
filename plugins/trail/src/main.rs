@@ -5,8 +5,8 @@ mod history;
 mod model;
 mod open;
 mod record;
+mod session;
 mod theme;
-mod usage;
 mod view;
 
 use std::collections::BTreeSet;

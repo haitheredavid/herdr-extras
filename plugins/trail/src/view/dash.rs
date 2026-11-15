@@ -9,8 +9,8 @@ use ratatui::style::{Modifier, Style};
 use super::gutter::fmt_cost;
 use super::{App, fmt_dur, put_str, status_glyph, truncate};
 use crate::model::{HISTORY_MS, status_time};
+use crate::session::fmt_tokens;
 use crate::theme::theme;
-use crate::usage::fmt_tokens;
 
 const SPARK: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 /// Partial cells of the working bar, by eighths filled from the left.
@@ -51,7 +51,7 @@ pub fn render(buf: &mut Buffer, body: Rect, app: &mut App, lanes: &[usize]) {
         .iter()
         .filter_map(|&li| {
             let l = &app.state.lanes[li];
-            app.usage.max_between(&l.sessions, from, l.closed_ms.unwrap_or(now))
+            app.sessions.max_between(l, from, l.closed_ms.unwrap_or(now))
         })
         .max()
         .unwrap_or(0);
@@ -109,15 +109,15 @@ pub fn render(buf: &mut Buffer, body: Rect, app: &mut App, lanes: &[usize]) {
                     if at >= end {
                         return ' ';
                     }
-                    app.usage
-                        .ctx_at(&lane.sessions, at)
+                    app.sessions
+                        .ctx_at(lane, at)
                         .map_or(' ', |c| SPARK[((c as f64 / spark_max as f64) * 7.0).round().clamp(0.0, 7.0) as usize])
                 })
                 .collect();
             put_str(buf, body, x_spark, y, &spark, Style::new().fg(color));
         }
 
-        let ctx = app.usage.ctx_at(&lane.sessions, end).map_or("–".into(), fmt_tokens);
+        let ctx = app.sessions.ctx_at(lane, end).map_or("–".into(), fmt_tokens);
         put_str(buf, body, x_ctx, y, &format!("{ctx:>5}"), Style::new());
 
         let st = status_time(lane, from, now);
@@ -125,10 +125,9 @@ pub fn render(buf: &mut Buffer, body: Rect, app: &mut App, lanes: &[usize]) {
         put_str(buf, body, x_work, y, &bar(share), Style::new().fg(theme().working));
         put_str(buf, body, x_work + BAR_W as u16, y, &format!("{:>4}%", (share * 100.0).round() as u32), Style::new());
 
-        let (reqs, cost) = app.usage.spend_between(&lane.sessions, from, now);
-        let has_usage = app.usage.has_samples(&lane.sessions);
-        put_str(buf, body, x_cost, y, &format!("{:>8}", fmt_cost(has_usage.then_some(cost))), Style::new());
-        let reqs = if has_usage { reqs.to_string() } else { "–".into() };
+        let spend = app.sessions.spend_between(lane, from, now);
+        put_str(buf, body, x_cost, y, &format!("{:>8}", fmt_cost(spend.cost)), Style::new());
+        let reqs = if app.sessions.has_usage(lane) { spend.requests.to_string() } else { "–".into() };
         put_str(buf, body, x_req, y, &format!("{reqs:>5}"), Style::new());
 
         let state = match lane.closed_ms {
@@ -144,8 +143,6 @@ mod tests {
     use super::super::tests::{render, row, sample_app};
     use super::super::{Orient, ViewKind};
     use super::*;
-    use crate::usage::Sample;
-    use std::path::PathBuf;
 
     #[test]
     fn bar_fills_by_eighths() {
@@ -159,12 +156,8 @@ mod tests {
     fn row_shows_share_spend_and_state() {
         // Idle 0..2000, working 2000..5000, blocked 5000..8500: 3000 of 8500 ms working, 23 eighths.
         let mut app = sample_app(ViewKind::Dash, Orient::Horizontal);
-        let path = PathBuf::from("/s.jsonl");
-        app.state.lanes[0].sessions.push(path.clone());
-        app.usage.insert(
-            path,
-            vec![Sample { at_ms: 1000, ctx: 120_000, cost: 0.5 }, Sample { at_ms: 3000, ctx: 150_000, cost: 0.75 }],
-        );
+        let id = app.state.lanes[0].id;
+        app.sessions.insert_samples(id, &[(1000, 120_000, Some(0.5)), (3000, 150_000, Some(0.75))]);
         let buf = render(&mut app, FIXED_W + 1, 6);
         let line = row(&buf, 2, 0, FIXED_W + 1);
         assert!(line.contains("150k"), "{line}");
