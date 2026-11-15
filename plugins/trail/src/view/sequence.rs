@@ -49,8 +49,7 @@ pub(super) fn pts(
         let s = &lane.steps[first];
         out.push(Pt::new(Some(('…', theme().dim)), level_at(s.at_ms), Some(s.status)));
     }
-    for k in first..end {
-        let s = &lane.steps[k];
+    for (k, s) in lane.steps.iter().enumerate().take(end).skip(first) {
         let (level, status) = (level_at(s.at_ms), Some(s.status));
         out.push(Pt::new(Some(node_glyph(s.mark)), level, status));
         if width(k) > 1 {
