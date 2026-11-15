@@ -7,8 +7,8 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 
 use super::{App, fmt_dur, put_str, truncate};
-use crate::theme::theme;
 use crate::model::{HISTORY_MS, status_time};
+use crate::theme::theme;
 use crate::usage::fmt_tokens;
 
 const SPARK: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
@@ -33,7 +33,7 @@ const MIN_SPARK: u16 = 6;
 fn bar(share: f64) -> String {
     let eighths = (share.clamp(0.0, 1.0) * (BAR_W * 8) as f64).round() as usize;
     let mut s = "█".repeat(eighths / 8);
-    if eighths % 8 > 0 {
+    if !eighths.is_multiple_of(8) {
         s.push(BAR[eighths % 8]);
     }
     format!("{s:<BAR_W$}")
@@ -105,9 +105,9 @@ pub fn render(buf: &mut Buffer, body: Rect, app: &mut App, lanes: &[usize]) {
                     if at >= end {
                         return ' ';
                     }
-                    app.usage.ctx_at(&lane.sessions, at).map_or(' ', |c| {
-                        SPARK[((c as f64 / spark_max as f64) * 7.0).round().clamp(0.0, 7.0) as usize]
-                    })
+                    app.usage
+                        .ctx_at(&lane.sessions, at)
+                        .map_or(' ', |c| SPARK[((c as f64 / spark_max as f64) * 7.0).round().clamp(0.0, 7.0) as usize])
                 })
                 .collect();
             put_str(buf, body, x_spark, y, &spark, Style::new().fg(color));
@@ -155,7 +155,10 @@ mod tests {
         let mut app = sample_app(ViewKind::Dash, Orient::Horizontal);
         let path = PathBuf::from("/s.jsonl");
         app.state.lanes[0].sessions.push(path.clone());
-        app.usage.insert(path, vec![Sample { at_ms: 1000, ctx: 120_000, cost: 0.5 }, Sample { at_ms: 3000, ctx: 150_000, cost: 0.75 }]);
+        app.usage.insert(
+            path,
+            vec![Sample { at_ms: 1000, ctx: 120_000, cost: 0.5 }, Sample { at_ms: 3000, ctx: 150_000, cost: 0.75 }],
+        );
         let buf = render(&mut app, FIXED_W + 1, 6);
         let line = row(&buf, 2, 0, FIXED_W + 1);
         assert!(line.contains("150k"), "{line}");

@@ -112,11 +112,8 @@ impl Tracker {
 
     /// Largest context in `[from_ms, to_ms]`, counting the value already in effect at `from_ms`.
     pub fn max_between(&self, sessions: &[PathBuf], from_ms: i64, to_ms: i64) -> Option<u64> {
-        let inside = self
-            .samples(sessions)
-            .flat_map(|s| s.iter().filter(|x| x.at_ms > from_ms && x.at_ms <= to_ms))
-            .map(|s| s.ctx)
-            .max();
+        let inside =
+            self.samples(sessions).flat_map(|s| s.iter().filter(|x| x.at_ms > from_ms && x.at_ms <= to_ms)).map(|s| s.ctx).max();
         inside.max(self.ctx_at(sessions, from_ms))
     }
 }
@@ -154,7 +151,7 @@ pub(crate) mod tests {
 
     #[test]
     fn reads_appends_and_holds_partial_lines() {
-        let dir = std::env::temp_dir().join(format!("herdr-track-usage-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("herdr-trail-usage-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("s.jsonl");
         let line1 = assistant("2026-11-13T00:00:01Z", 0, 100, 0);

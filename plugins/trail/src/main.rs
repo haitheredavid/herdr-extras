@@ -26,7 +26,7 @@ const SNAPSHOT_EVERY: Duration = Duration::from_secs(5);
 const RETRY_EVERY: Duration = Duration::from_secs(2);
 const RESUBSCRIBE_AFTER_LOSS: Duration = Duration::from_secs(1);
 const REDRAW_EVERY: Duration = Duration::from_secs(1);
-const USAGE: &str = "usage: herdr-track [--popup] [--view time|sequence|area|heat|dash] [--orient h|v] | --dump [--width N --height N ...] | open split|popup | record | follow";
+const USAGE: &str = "usage: herdr-trail [--popup] [--view time|sequence|area|heat|dash] [--orient h|v] | --dump [--width N --height N ...] | open split|popup | record | follow";
 
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
@@ -46,8 +46,7 @@ struct Opts {
 }
 
 fn parse_opts(args: &[String]) -> anyhow::Result<Opts> {
-    let mut o =
-        Opts { popup: false, dump: false, view: ViewKind::Time, orient: Orient::Horizontal, width: 120, height: 30 };
+    let mut o = Opts { popup: false, dump: false, view: ViewKind::Time, orient: Orient::Horizontal, width: 120, height: 30 };
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut value = || it.next().with_context(|| format!("{a} needs a value"));
@@ -92,7 +91,7 @@ fn main() -> anyhow::Result<()> {
                 _ => follow::run(),
             };
             if let Err(e) = result {
-                eprintln!("herdr-track {cmd}: {e:#}");
+                eprintln!("herdr-trail {cmd}: {e:#}");
                 std::process::exit(1);
             }
             Ok(())
@@ -104,7 +103,7 @@ fn main() -> anyhow::Result<()> {
             }
             Ok(o) => run_tui(&o),
             Err(e) => {
-                eprintln!("herdr-track: {e:#}\n{USAGE}");
+                eprintln!("herdr-trail: {e:#}\n{USAGE}");
                 std::process::exit(2);
             }
         },

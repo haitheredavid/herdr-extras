@@ -1,0 +1,22 @@
+[package]
+name = "herdr-trail"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+publish = false
+description = "Agent activity timeline for herdr: state, context and cost per agent, and a step-through session timeline"
+repository = "https://github.com/haitheredavid/herdr-extras"
+
+[dependencies]
+anyhow = "1.0.104"
+chrono = "0.4.45"
+ratatui = "0.30.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+toml = "0.8.23"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

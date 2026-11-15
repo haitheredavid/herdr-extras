@@ -8,8 +8,8 @@ use ratatui::style::Style;
 
 use super::time::{AXIS_W, draw_axis, start_ms};
 use super::{App, Grid, Orient, Pt, put_str};
-use crate::theme::theme;
 use crate::model::{Lane, status_time};
+use crate::theme::theme;
 
 fn pts(lane: &Lane, start: i64, bucket: i64, n: usize, now_ms: i64) -> Vec<Pt> {
     (0..n)

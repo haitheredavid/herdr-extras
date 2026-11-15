@@ -9,8 +9,8 @@ use ratatui::style::{Color, Modifier, Style};
 
 use super::time::{AXIS_W, start_ms};
 use super::{App, AreaMode, Orient, put_str, time_ticks, truncate};
-use crate::theme::{mix, theme};
 use crate::model::{HISTORY_MS, Lane};
+use crate::theme::{mix, theme};
 use crate::usage::{Tracker, fmt_tokens};
 
 /// ↔ value-axis gutter (`530k `) and end-label margin.
@@ -36,11 +36,7 @@ fn nice_ceil(v: u64) -> u64 {
         return 0;
     }
     let mag = 10f64.powi((v as f64).log10().floor() as i32);
-    [1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0]
-        .iter()
-        .map(|m| (m * mag).round() as u64)
-        .find(|&n| n >= v)
-        .unwrap_or(v)
+    [1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0].iter().map(|m| (m * mag).round() as u64).find(|&n| n >= v).unwrap_or(v)
 }
 
 /// Braille cells: per-cell dot mask, line color and fill color.

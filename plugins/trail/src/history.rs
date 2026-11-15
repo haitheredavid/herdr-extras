@@ -1,4 +1,4 @@
-//! Agent history log: JSONL, one file per UTC month, written by `herdr-track record` and loaded
+//! Agent history log: JSONL, one file per UTC month, written by `herdr-trail record` and loaded
 //! on start so the track shows what happened before the panel opened.
 
 use std::path::{Path, PathBuf};
@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::herdr::PLUGIN_ID;
 use crate::model::AgentStatus;
 
-/// One line of the history log, written by `herdr-track record`.
+/// One line of the history log, written by `herdr-trail record`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LogEvent {
     pub ts_ms: i64,
@@ -35,7 +35,7 @@ fn env_nonempty(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|s| !s.is_empty())
 }
 
-/// `$HERDR_PLUGIN_STATE_DIR`, else `~/.local/state/herdr/plugins/herdr-extras.track`.
+/// `$HERDR_PLUGIN_STATE_DIR`, else `~/.local/state/herdr/plugins/herdr-trail`.
 pub fn log_dir() -> PathBuf {
     if let Some(dir) = env_nonempty("HERDR_PLUGIN_STATE_DIR") {
         return PathBuf::from(dir);

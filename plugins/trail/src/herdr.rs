@@ -16,7 +16,7 @@ use crate::model::Snapshot;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 const IO_TIMEOUT: Duration = Duration::from_secs(2);
-pub const PLUGIN_ID: &str = "herdr-extras.track";
+pub const PLUGIN_ID: &str = "herdr-trail";
 
 /// Plugin id herdr launched us under, else the manifest id.
 pub fn plugin_id() -> String {
@@ -38,7 +38,7 @@ fn connect() -> anyhow::Result<UnixStream> {
 
 fn request_line(method: &str, params: Value) -> String {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    let mut line = json!({ "id": format!("ht-{id}"), "method": method, "params": params }).to_string();
+    let mut line = json!({ "id": format!("trail-{id}"), "method": method, "params": params }).to_string();
     line.push('\n');
     line
 }
@@ -98,17 +98,11 @@ impl Subscriber {
 }
 
 pub fn subscribe(generation: u64, pane_ids: &[String], tx: Sender<Msg>) -> anyhow::Result<Subscriber> {
-    let mut subs: Vec<Value> = [
-        "pane.created",
-        "pane.closed",
-        "pane.updated",
-        "pane.exited",
-        "pane.moved",
-        "pane.agent_detected",
-    ]
-    .iter()
-    .map(|t| json!({ "type": t }))
-    .collect();
+    let mut subs: Vec<Value> =
+        ["pane.created", "pane.closed", "pane.updated", "pane.exited", "pane.moved", "pane.agent_detected"]
+            .iter()
+            .map(|t| json!({ "type": t }))
+            .collect();
     subs.extend(pane_ids.iter().map(|id| json!({ "type": "pane.agent_status_changed", "pane_id": id })));
 
     let mut stream = connect()?;
@@ -136,9 +130,10 @@ pub fn subscribe(generation: u64, pane_ids: &[String], tx: Sender<Msg>) -> anyho
                     return;
                 }
             } else if v.pointer("/result/type").and_then(Value::as_str) == Some("subscription_started")
-                && tx.send(Msg::SubStarted(generation)).is_err() {
-                    return;
-                }
+                && tx.send(Msg::SubStarted(generation)).is_err()
+            {
+                return;
+            }
         }
         let _ = tx.send(Msg::Lost(generation));
     });

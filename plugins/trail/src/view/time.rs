@@ -21,11 +21,7 @@ pub(super) fn start_ms(app: &App, lanes: &[usize], bucket: i64, n: usize) -> i64
     }
     let now = app.now_ms;
     let earliest = lanes.iter().map(|&i| app.state.lanes[i].opened_ms).min().unwrap_or(now);
-    if now - earliest < span {
-        earliest.div_euclid(bucket) * bucket
-    } else {
-        (now.div_euclid(bucket) + 1) * bucket - span
-    }
+    if now - earliest < span { earliest.div_euclid(bucket) * bucket } else { (now.div_euclid(bucket) + 1) * bucket - span }
 }
 
 fn cell(lane: &Lane, t0: i64, t1: i64, now_ms: i64, orient: Orient) -> Cell {
@@ -103,7 +99,7 @@ mod tests {
         assert_eq!(buf[(GUTTER + 8, 2)].fg, theme().blocked, "head in the current status color");
         assert_eq!(buf[(GUTTER + 1, 2)].fg, theme().series_color(0, 1), "lines take the agent's color");
         assert_eq!(buf[(GUTTER + 2, 2)].fg, theme().working, "status nodes keep status colors");
-        assert!(row(&buf, 0, 0, GUTTER + 12).starts_with("track · TIME · ↔"));
+        assert!(row(&buf, 0, 0, GUTTER + 12).starts_with("trail · TIME · ↔"));
     }
 
     #[test]

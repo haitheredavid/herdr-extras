@@ -1,4 +1,4 @@
-//! `herdr-track open split|popup`: opens the track from an action, as a band (a split below the
+//! `herdr-trail open split|popup`: opens the trail from an action, as a band (a split below the
 //! focused pane, shortened to `BAND_ROWS` and pinned so it follows focus across workspaces) or as
 //! a large popup over the layout.
 
@@ -17,7 +17,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
                 "plugin.pane.open",
                 json!({
                     "plugin_id": plugin_id(),
-                    "entrypoint": "track",
+                    "entrypoint": "trail",
                     "placement": "split",
                     "direction": "down",
                     "focus": true,
@@ -32,7 +32,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             "plugin.pane.open",
             json!({
                 "plugin_id": plugin_id(),
-                "entrypoint": "track-popup",
+                "entrypoint": "trail-popup",
                 "placement": "popup",
                 "width": "80%",
                 "height": "80%",
@@ -40,7 +40,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             }),
         )
         .map(drop),
-        other => bail!("unknown open target {other:?}; usage: herdr-track open split|popup"),
+        other => bail!("unknown open target {other:?}; usage: herdr-trail open split|popup"),
     }
 }
 

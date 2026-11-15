@@ -1,4 +1,4 @@
-//! `herdr-track follow`: the `workspace.focused`/`tab.focused` hook that keeps the band pinned.
+//! `herdr-trail follow`: the `workspace.focused`/`tab.focused` hook that keeps the band pinned.
 //! `open split` records the band's terminal id (pane ids are per workspace and change when a pane
 //! moves; the terminal id doesn't), and each focus change moves the band into the focused tab.
 
@@ -32,10 +32,8 @@ pub fn pin(pane: &Value) -> anyhow::Result<()> {
 
 pub fn run() -> anyhow::Result<()> {
     let Ok(terminal) = std::fs::read_to_string(pin_file()) else { return Ok(()) };
-    let payload: Value = std::env::var("HERDR_PLUGIN_EVENT_JSON")
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or(Value::Null);
+    let payload: Value =
+        std::env::var("HERDR_PLUGIN_EVENT_JSON").ok().and_then(|raw| serde_json::from_str(&raw).ok()).unwrap_or(Value::Null);
     let data = &payload["data"];
     let tab_id = match data["tab_id"].as_str() {
         Some(t) => t.to_string(),
@@ -66,9 +64,7 @@ pub fn run() -> anyhow::Result<()> {
             "focus": false,
         }),
     )?;
-    let new_id = moved["move_result"]["pane"]["pane_id"]
-        .as_str()
-        .ok_or_else(|| anyhow!("pane.move: no pane id in response"))?;
+    let new_id = moved["move_result"]["pane"]["pane_id"].as_str().ok_or_else(|| anyhow!("pane.move: no pane id in response"))?;
     shorten(new_id, BAND_ROWS)
 }
 

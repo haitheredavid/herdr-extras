@@ -473,9 +473,7 @@ impl Grid {
     /// Lanes that fit side by side.
     fn slots(&self) -> usize {
         match self.orient {
-            Orient::Horizontal => {
-                ((self.body.height.saturating_sub(self.lead) + self.gap()) / (self.band + self.gap())) as usize
-            }
+            Orient::Horizontal => ((self.body.height.saturating_sub(self.lead) + self.gap()) / (self.band + self.gap())) as usize,
             Orient::Vertical => (self.body.width.saturating_sub(self.lead) / COL_W) as usize,
         }
     }
@@ -539,7 +537,8 @@ impl Grid {
                             buf[(cx, y)].set_style(Style::new().add_modifier(Modifier::REVERSED));
                         }
                     }
-                    let (glyph, gs) = if lane.is_open() { ('●', Style::new().fg(theme().status(lane.status))) } else { ('✕', dim) };
+                    let (glyph, gs) =
+                        if lane.is_open() { ('●', Style::new().fg(theme().status(lane.status))) } else { ('✕', dim) };
                     put_str(buf, self.body, x, y, &glyph.to_string(), gs.patch(label_style));
                     put_str(buf, self.body, x + 2, y, &truncate(lane.label(), 13), label_style);
                     let ws = truncate(app.state.workspace_label(li), 6);
@@ -594,8 +593,7 @@ fn render_line(line: Line, area: Rect, buf: &mut Buffer) {
 
 pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
     let [header, body, detail, footer] =
-        Layout::vertical([Constraint::Length(1), Constraint::Min(1), Constraint::Length(1), Constraint::Length(1)])
-            .areas(area);
+        Layout::vertical([Constraint::Length(1), Constraint::Min(1), Constraint::Length(1), Constraint::Length(1)]).areas(area);
     let dim = Style::new().fg(theme().dim);
     let lanes = app.state.visible_lanes();
     app.selected = app.selected.min(lanes.len().saturating_sub(1));
@@ -618,12 +616,9 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) {
 
     let horizontal = app.orient == Orient::Horizontal;
     let mut spans = vec![
-        Span::styled("track", Style::new().add_modifier(Modifier::BOLD)),
+        Span::styled("trail", Style::new().add_modifier(Modifier::BOLD)),
         Span::raw(" · "),
-        Span::styled(
-            app.view.name(),
-            Style::new().fg(theme().accent).add_modifier(Modifier::BOLD),
-        ),
+        Span::styled(app.view.name(), Style::new().fg(theme().accent).add_modifier(Modifier::BOLD)),
         Span::raw(if horizontal { " · ↔" } else { " · ↕" }),
         Span::raw(format!(" · {} agents", lanes.len())),
     ];

@@ -14,9 +14,8 @@ use toml::{Table, Value};
 use crate::model::AgentStatus;
 
 /// Viridis, as 11 evenly spaced stops.
-const VIRIDIS: [&str; 11] = [
-    "#440154", "#482475", "#414487", "#355f8d", "#2a788e", "#21918c", "#22a884", "#44bf70", "#7ad151", "#bddf26", "#fde725",
-];
+const VIRIDIS: [&str; 11] =
+    ["#440154", "#482475", "#414487", "#355f8d", "#2a788e", "#21918c", "#22a884", "#44bf70", "#7ad151", "#bddf26", "#fde725"];
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Theme {
@@ -165,11 +164,22 @@ impl Theme {
             let stops = value.as_array().ok_or("expected a list of #rrggbb")?;
             let stops = stops
                 .iter()
-                .map(|v| v.as_str().ok_or("expected #rrggbb".to_string()).and_then(parse).and_then(|c| rgb(&c).ok_or(format!("{c} is not #rrggbb"))))
+                .map(|v| {
+                    v.as_str()
+                        .ok_or("expected #rrggbb".to_string())
+                        .and_then(parse)
+                        .and_then(|c| rgb(&c).ok_or(format!("{c} is not #rrggbb")))
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             if stops.is_empty() { Err("needs at least one stop".into()) } else { Ok(stops) }
         };
-        let fraction = || value.as_float().or(value.as_integer().map(|i| i as f64)).filter(|f| (0.0..=1.0).contains(f)).ok_or("expected a number from 0 to 1".to_string());
+        let fraction = || {
+            value
+                .as_float()
+                .or(value.as_integer().map(|i| i as f64))
+                .filter(|f| (0.0..=1.0).contains(f))
+                .ok_or("expected a number from 0 to 1".to_string())
+        };
         match key {
             "background" => {
                 let c = color()?;

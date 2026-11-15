@@ -136,12 +136,7 @@ pub struct Lane {
 
 impl Lane {
     pub fn label(&self) -> &str {
-        self.title
-            .as_deref()
-            .filter(|t| !t.is_empty())
-            .or(self.task())
-            .or(self.agent.as_deref())
-            .unwrap_or(&self.pane_id)
+        self.title.as_deref().filter(|t| !t.is_empty()).or(self.task()).or(self.agent.as_deref()).unwrap_or(&self.pane_id)
     }
 
     /// What the agent is doing, from its terminal title.
@@ -600,10 +595,8 @@ mod tests {
         for kind in ["pane.agent_status_changed", "pane_agent_status_changed"] {
             let mut s = State::default();
             s.open("p1", "w1", 0, Mark::Seen, AgentStatus::Idle, true);
-            let env = Envelope {
-                event: kind.into(),
-                data: json!({"pane_id": "p1", "workspace_id": "w1", "agent_status": "working"}),
-            };
+            let env =
+                Envelope { event: kind.into(), data: json!({"pane_id": "p1", "workspace_id": "w1", "agent_status": "working"}) };
             s.apply_envelope(&env, 10);
             assert_eq!(s.lanes[0].status, AgentStatus::Working, "{kind}");
             assert_eq!(s.lanes[0].steps.last().unwrap().mark, Mark::Status(AgentStatus::Working));
@@ -634,7 +627,10 @@ mod tests {
         };
         s.apply_envelope(&env, 5);
         assert!(s.lanes.is_empty());
-        s.apply_envelope(&Envelope { event: "pane_updated".into(), data: json!({"pane": {"pane_id": "w3:p5", "workspace_id": "w3"}}) }, 6);
+        s.apply_envelope(
+            &Envelope { event: "pane_updated".into(), data: json!({"pane": {"pane_id": "w3:p5", "workspace_id": "w3"}}) },
+            6,
+        );
         assert!(s.lanes.is_empty(), "the band's new pane id is still itself");
     }
 

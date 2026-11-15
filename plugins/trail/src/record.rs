@@ -1,4 +1,4 @@
-//! `herdr-track record`: the herdr `[[events]]` hook. Appends one JSON line per pane event to the
+//! `herdr-trail record`: the herdr `[[events]]` hook. Appends one JSON line per pane event to the
 //! monthly history log so the track keeps its nodes across restarts.
 
 use std::fs::OpenOptions;
@@ -7,8 +7,8 @@ use std::io::Write;
 use anyhow::Context;
 use serde_json::Value;
 
-use crate::model::AgentStatus;
 use crate::history::{LogEvent, log_dir, log_file, session_name};
+use crate::model::AgentStatus;
 
 pub fn run() -> anyhow::Result<()> {
     let payload = env_json("HERDR_PLUGIN_EVENT_JSON");
@@ -20,7 +20,7 @@ pub fn run() -> anyhow::Result<()> {
         .unwrap_or_default();
     let ts_ms = chrono::Utc::now().timestamp_millis();
     let Some(record) = event_from(&event, &payload, &context, &session_name(), ts_ms) else {
-        eprintln!("herdr-track record: {event:?} payload has no pane_id; skipped");
+        eprintln!("herdr-trail record: {event:?} payload has no pane_id; skipped");
         return Ok(());
     };
     let dir = log_dir();
