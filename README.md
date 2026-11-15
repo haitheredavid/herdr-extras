@@ -36,6 +36,7 @@ Actions `herdr-extras.track.open` (a 14-row band below the focused pane, full wi
 - **Keys** follow the orientation. The lane keys are `j/k` in ↔ and `h/l` in ↕, and the other pair scrolls along time. In TIME, `+/-` zoom through 1s, 5s, 15s, 1m and 5m buckets. `f` returns to following now, `Enter` focuses the selected agent's pane, `u` toggles usage bands, `r` re-snapshots and `q` quits (`Esc` also quits in the popup).
 - **Nodes**: `◆` created, `◇` first seen already running, `●` status change (colored by the new status), `◉` several changes in one cell, `✕` closed or exited, `▸`/`▾` now. Lines take each agent's viridis color (the same one AREA uses); their weight is the status: `━` working, blocked or done, `─` idle, `┈` unknown. Nodes, the head and the gutter dot carry status colors: green working, red blocked, blue done.
 - **History**: an `[[events]]` recorder appends every pane lifecycle event to `$HERDR_PLUGIN_STATE_DIR/events-YYYY-MM.jsonl` (one file per UTC month). The panel loads the last 2 h of the log on open, so nodes from before it opened still show.
+- **Pinned band**: the band from `open` follows you. `workspace.focused`/`tab.focused` hooks move it (same process, so view and scroll survive) to the bottom of whichever tab you switch to, full width and 14 rows, without taking focus. It is tracked by terminal id in `$HERDR_PLUGIN_STATE_DIR/pinned`, since pane ids change when a pane moves across workspaces; closing the band unpins it, and opening another band pins the new one. It stays put if moving it would leave its tab empty.
 
 ### Theme
 

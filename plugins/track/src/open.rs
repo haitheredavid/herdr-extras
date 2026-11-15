@@ -1,5 +1,6 @@
 //! `herdr-track open split|popup`: opens the track from an action, as a band (a split below the
-//! focused pane, shortened to `BAND_ROWS`) or as a large popup over the layout.
+//! focused pane, shortened to `BAND_ROWS` and pinned so it follows focus across workspaces) or as
+//! a large popup over the layout.
 
 use anyhow::{anyhow, bail};
 use serde_json::{Value, json};
@@ -22,10 +23,10 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
                     "focus": true,
                 }),
             )?;
-            let pane_id = opened["plugin_pane"]["pane"]["pane_id"]
-                .as_str()
-                .ok_or_else(|| anyhow!("plugin.pane.open: no pane id in response"))?;
-            shorten(pane_id, BAND_ROWS)
+            let pane = &opened["plugin_pane"]["pane"];
+            let pane_id = pane["pane_id"].as_str().ok_or_else(|| anyhow!("plugin.pane.open: no pane id in response"))?;
+            shorten(pane_id, BAND_ROWS)?;
+            crate::follow::pin(pane)
         }
         Some("popup") => request(
             "plugin.pane.open",
@@ -44,7 +45,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
 }
 
 /// herdr only sizes popups, so shrink the new split to `rows` by setting its parent split's ratio.
-fn shorten(pane_id: &str, rows: u16) -> anyhow::Result<()> {
+pub fn shorten(pane_id: &str, rows: u16) -> anyhow::Result<()> {
     let export = request("layout.export", json!({ "pane_id": pane_id }))?;
     let root = &export["layout"]["root"];
     let path = path_to(root, pane_id).ok_or_else(|| anyhow!("layout.export: {pane_id} not in tab layout"))?;

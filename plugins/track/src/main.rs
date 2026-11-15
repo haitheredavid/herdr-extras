@@ -1,3 +1,4 @@
+mod follow;
 mod herdr;
 mod history;
 mod model;
@@ -25,7 +26,7 @@ const SNAPSHOT_EVERY: Duration = Duration::from_secs(5);
 const RETRY_EVERY: Duration = Duration::from_secs(2);
 const RESUBSCRIBE_AFTER_LOSS: Duration = Duration::from_secs(1);
 const REDRAW_EVERY: Duration = Duration::from_secs(1);
-const USAGE: &str = "usage: herdr-track [--popup] [--view time|sequence|area|heat|dash] [--orient h|v] | --dump [--width N --height N ...] | open split|popup | record";
+const USAGE: &str = "usage: herdr-track [--popup] [--view time|sequence|area|heat|dash] [--orient h|v] | --dump [--width N --height N ...] | open split|popup | record | follow";
 
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
@@ -84,8 +85,12 @@ fn parse_opts(args: &[String]) -> anyhow::Result<Opts> {
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        Some(cmd @ ("open" | "record")) => {
-            let result = if cmd == "open" { open::run(&args[1..]) } else { record::run() };
+        Some(cmd @ ("open" | "record" | "follow")) => {
+            let result = match cmd {
+                "open" => open::run(&args[1..]),
+                "record" => record::run(),
+                _ => follow::run(),
+            };
             if let Err(e) = result {
                 eprintln!("herdr-track {cmd}: {e:#}");
                 std::process::exit(1);

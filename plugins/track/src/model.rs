@@ -459,6 +459,11 @@ impl State {
             }
             "pane_moved" => {
                 let Ok(p) = serde_json::from_value::<MovedPayload>(data) else { return };
+                if self.is_self(&p.previous_pane_id) {
+                    // The pinned band followed focus to another workspace: keep skipping it.
+                    self.self_pane = Some(p.pane.pane_id);
+                    return;
+                }
                 if let Some(i) = self.open_lane(&p.previous_pane_id) {
                     self.lanes[i].pane_id = p.pane.pane_id.clone();
                 }
@@ -618,6 +623,19 @@ mod tests {
         assert_eq!(s.lanes.len(), 1);
         assert_eq!((s.lanes[0].pane_id.as_str(), s.lanes[0].workspace_id.as_str()), ("w2:p4", "w2"));
         assert_eq!(s.lanes[0].agent.as_deref(), Some("omp"));
+    }
+
+    #[test]
+    fn moved_self_stays_self() {
+        let mut s = State::new(Some("w1:p2".into()));
+        let env = Envelope {
+            event: "pane_moved".into(),
+            data: json!({"previous_pane_id": "w1:p2", "pane": {"pane_id": "w3:p5", "workspace_id": "w3"}}),
+        };
+        s.apply_envelope(&env, 5);
+        assert!(s.lanes.is_empty());
+        s.apply_envelope(&Envelope { event: "pane_updated".into(), data: json!({"pane": {"pane_id": "w3:p5", "workspace_id": "w3"}}) }, 6);
+        assert!(s.lanes.is_empty(), "the band's new pane id is still itself");
     }
 
     #[test]
