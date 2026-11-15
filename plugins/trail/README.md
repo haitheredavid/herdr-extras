@@ -277,7 +277,7 @@ With `mouse = true`, clicks work once the band is focused: click selects, double
 
 ## Agent support
 
-Every agent herdr detects gets a lane with its state. Usage and the timeline come from the session file herdr reports for the pane.
+Every agent herdr detects gets a lane with its state. Usage and the timeline come from the session herdr reports for the pane, which needs herdr's integration for that agent (`herdr integration install omp|claude|codex`; `herdr integration status` lists them). Nothing else needs setting up.
 
 | Agent | Context | Tokens | Cost | Timeline |
 | --- | --- | --- | --- | --- |
@@ -374,6 +374,7 @@ closed = "gray"
 - `herdr plugin log list --plugin herdr-trail` shows the output of the install step, the recorder and the follow hook.
 - The header shows `herdr not reachable at <socket>` when the panel can't talk to herdr; it keeps retrying.
 - `herdr protocol N untested (built for 22)` means herdr is newer than this build; it keeps working but may miss fields.
+- An agent's lane shows ctx `–` and its timeline says `no session file: herdr status only`: herdr hasn't received that pane's session. Check `herdr integration status`, then `herdr api snapshot | jq '.result.snapshot.panes[] | {pane_id, agent, agent_session}'`. If `agent_session` is `null` with the integration installed, the agent's session-start hook didn't report it, and the lane stays status-only for that session.
 - To force a source build (no download): `HERDR_TRAIL_BUILD=source sh scripts/install.sh` in the plugin directory.
 
 ## Uninstall
