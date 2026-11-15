@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, bail};
 use ratatui::buffer::Buffer;
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::Rect;
 use serde_json::json;
 
@@ -27,7 +27,7 @@ const SNAPSHOT_EVERY: Duration = Duration::from_secs(5);
 const RETRY_EVERY: Duration = Duration::from_secs(2);
 const RESUBSCRIBE_AFTER_LOSS: Duration = Duration::from_secs(1);
 const REDRAW_EVERY: Duration = Duration::from_secs(1);
-const USAGE: &str = "usage: herdr-trail [--popup] [--view time|sequence|area|heat|dash] [--orient h|v] | --dump [--width N --height N ...] | open split|popup | record | follow";
+const USAGE: &str = "usage: herdr-trail [--popup] [--view time|sequence|area|heat|dash] [--orient h|v] | --dump [--width N --height N --keys \"j j Tab\" ...] | open split|popup | record | follow";
 
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
@@ -44,6 +44,40 @@ struct Opts {
     orient: Orient,
     width: u16,
     height: u16,
+    /// `--dump` presses these before drawing.
+    keys: Vec<KeyEvent>,
+}
+
+/// Keys from `--keys`: space-separated single characters, key names, or `Space`.
+fn parse_keys(s: &str) -> anyhow::Result<Vec<KeyEvent>> {
+    s.split_whitespace()
+        .map(|t| {
+            let code = match t {
+                "Tab" => KeyCode::Tab,
+                "BackTab" => KeyCode::BackTab,
+                "Esc" => KeyCode::Esc,
+                "Enter" => KeyCode::Enter,
+                "Backspace" => KeyCode::Backspace,
+                "Up" => KeyCode::Up,
+                "Down" => KeyCode::Down,
+                "Left" => KeyCode::Left,
+                "Right" => KeyCode::Right,
+                "Home" => KeyCode::Home,
+                "End" => KeyCode::End,
+                "PgUp" => KeyCode::PageUp,
+                "PgDn" => KeyCode::PageDown,
+                "Space" => KeyCode::Char(' '),
+                _ => {
+                    let mut chars = t.chars();
+                    match (chars.next(), chars.next()) {
+                        (Some(c), None) => KeyCode::Char(c),
+                        _ => bail!("unknown key {t:?}"),
+                    }
+                }
+            };
+            Ok(KeyEvent::new(code, KeyModifiers::NONE))
+        })
+        .collect()
 }
 
 fn parse_orient(v: &str) -> anyhow::Result<Orient> {
@@ -58,7 +92,7 @@ fn parse_opts(args: &[String]) -> anyhow::Result<Opts> {
     let cfg = config::config();
     let view = cfg.start_view.as_deref().and_then(ViewKind::from_name).unwrap_or(ViewKind::Time);
     let orient = cfg.start_orient.as_deref().and_then(|o| parse_orient(o).ok()).unwrap_or(Orient::Horizontal);
-    let mut o = Opts { popup: false, dump: false, view, orient, width: 120, height: 30 };
+    let mut o = Opts { popup: false, dump: false, view, orient, width: 120, height: 30, keys: Vec::new() };
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut value = || it.next().with_context(|| format!("{a} needs a value"));
@@ -72,11 +106,12 @@ fn parse_opts(args: &[String]) -> anyhow::Result<Opts> {
             "--orient" => o.orient = parse_orient(value()?)?,
             "--width" => o.width = value()?.parse().context("--width")?,
             "--height" => o.height = value()?.parse().context("--height")?,
+            "--keys" => o.keys = parse_keys(value()?)?,
             other => bail!("unknown argument {other:?}"),
         }
     }
-    if !o.dump && args.iter().any(|a| a == "--width" || a == "--height") {
-        bail!("--width/--height only apply to --dump");
+    if !o.dump && args.iter().any(|a| a == "--width" || a == "--height" || a == "--keys") {
+        bail!("--width/--height/--keys only apply to --dump");
     }
     Ok(o)
 }
@@ -145,6 +180,11 @@ fn start(o: &Opts) -> (App, bool) {
 fn dump(o: &Opts) {
     let (mut app, _) = start(o);
     let area = Rect::new(0, 0, o.width, o.height);
+    // A first draw sets the geometry keys depend on (time cells, scroll).
+    view::draw(&mut Buffer::empty(area), area, &mut app);
+    for &k in &o.keys {
+        app.on_key(k);
+    }
     let mut buf = Buffer::empty(area);
     view::draw(&mut buf, area, &mut app);
     for y in 0..area.height {
@@ -264,4 +304,24 @@ fn run_tui(o: &Opts) -> anyhow::Result<()> {
     }
     ratatui::restore();
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(s: &str) -> Vec<String> {
+        s.split(' ').map(String::from).collect()
+    }
+
+    #[test]
+    fn parse_opts_reads_keys() {
+        let mut a = args("--dump");
+        a.extend(["--keys".to_string(), "j Tab ? Space".to_string()]);
+        let o = parse_opts(&a).unwrap();
+        let codes: Vec<KeyCode> = o.keys.iter().map(|k| k.code).collect();
+        assert_eq!(codes, [KeyCode::Char('j'), KeyCode::Tab, KeyCode::Char('?'), KeyCode::Char(' ')]);
+        assert!(parse_opts(&args("--dump --keys Nope")).is_err());
+        assert!(parse_opts(&args("--keys j")).is_err(), "--keys needs --dump");
+    }
 }

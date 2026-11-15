@@ -234,6 +234,12 @@ pub struct State {
     next_slot: usize,
 }
 
+/// Which lanes the views show.
+#[derive(Debug, Clone, Default)]
+pub struct Query {
+    pub show_closed: bool,
+}
+
 fn nonempty(s: &Option<String>) -> Option<String> {
     s.clone().filter(|s| !s.is_empty())
 }
@@ -472,14 +478,20 @@ impl State {
         lane.tab_id.as_ref().and_then(|t| self.tabs.get(t)).map(String::as_str).or(lane.tab_label.as_deref())
     }
 
-    /// Indices of agent lanes, by workspace label, then open time, then pane id.
-    pub fn visible_lanes(&self) -> Vec<usize> {
-        let mut idx: Vec<usize> = (0..self.lanes.len()).filter(|&i| self.lanes[i].visible()).collect();
+    /// Indices of agent lanes `q` shows, by workspace label, then open time, then pane id.
+    pub fn visible_lanes(&self, q: &Query) -> Vec<usize> {
+        let mut idx: Vec<usize> =
+            (0..self.lanes.len()).filter(|&i| self.lanes[i].visible() && (q.show_closed || self.lanes[i].is_open())).collect();
         idx.sort_by(|&a, &b| {
             let (la, lb) = (&self.lanes[a], &self.lanes[b]);
             (self.workspace_of(la), la.opened_ms, &la.pane_id).cmp(&(self.workspace_of(lb), lb.opened_ms, &lb.pane_id))
         });
         idx
+    }
+
+    /// Closed agent lanes `q` hides.
+    pub fn closed_hidden(&self, q: &Query) -> usize {
+        if q.show_closed { 0 } else { self.lanes.iter().filter(|l| l.visible() && !l.is_open()).count() }
     }
 
     /// Pane ids of open lanes seen live; the status subscription covers these.

@@ -85,6 +85,11 @@ impl Tracker {
         sessions.iter().filter_map(|p| self.files.get(p)).map(|t| t.samples.as_slice())
     }
 
+    /// Whether any of the lane's session files has usage yet.
+    pub fn has_samples(&self, sessions: &[PathBuf]) -> bool {
+        self.samples(sessions).any(|s| !s.is_empty())
+    }
+
     #[cfg(test)]
     pub fn insert(&mut self, path: PathBuf, samples: Vec<Sample>) {
         self.files.insert(path, Tail { samples, ..Tail::default() });

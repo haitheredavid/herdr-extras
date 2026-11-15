@@ -6,7 +6,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 
-use super::time::{AXIS_W, draw_axis, start_ms};
+use super::time::{axis_w, cells, draw_axis, start_ms};
 use super::{App, Grid, Orient, Pt, put_str};
 use crate::model::{Lane, status_time};
 use crate::theme::theme;
@@ -33,21 +33,25 @@ fn pts(lane: &Lane, start: i64, bucket: i64, n: usize, now_ms: i64) -> Vec<Pt> {
 
 pub fn render(buf: &mut Buffer, body: Rect, app: &mut App, lanes: &[usize]) {
     let horizontal = app.orient == Orient::Horizontal;
-    let grid = Grid { orient: app.orient, body, lead: if horizontal { 1 } else { AXIS_W }, band: 1 };
+    app.fit_bucket(lanes, cells(app, body));
+    let bucket = app.bucket_ms();
+    let lead = if horizontal { 1 } else { axis_w(bucket) };
+    let grid = Grid::new(app.orient, body, lead, 1, lanes.len());
     let n = grid.n();
     app.time_cells = n.max(1);
-    let bucket = app.bucket_ms();
-    let start = start_ms(app, lanes, bucket, n);
+    let start = start_ms(app, bucket, n);
     draw_axis(buf, &grid, start, bucket);
 
     // Scale key in the corner the axis leaves free.
     let dim = Style::new().fg(theme().dim);
-    let steps = if horizontal { 10 } else { 6 };
-    let mut x = put_str(buf, body, body.x, body.y, if horizontal { "idle " } else { "0" }, dim);
+    let corner = Rect::new(body.x, body.y, if horizontal { grid.cols.left() } else { lead }, 1);
+    let steps = if horizontal { 10 } else { lead.saturating_sub(2) as usize };
+    let mut x = put_str(buf, corner, body.x, body.y, if horizontal { "idle " } else { "0" }, dim);
     for i in 0..steps {
-        x = put_str(buf, body, x, body.y, "█", Style::new().fg(theme().heat_color(i as f64 / (steps - 1) as f64)));
+        let t = i as f64 / steps.saturating_sub(1).max(1) as f64;
+        x = put_str(buf, corner, x, body.y, "█", Style::new().fg(theme().heat_color(t)));
     }
-    put_str(buf, body, x, body.y, if horizontal { " work" } else { "1" }, dim);
+    put_str(buf, corner, x, body.y, if horizontal { " work" } else { "1" }, dim);
 
     let now = app.now_ms;
     grid.draw_lanes(buf, app, lanes, |lane, _, n| pts(lane, start, bucket, n, now));
@@ -55,17 +59,18 @@ pub fn render(buf: &mut Buffer, body: Rect, app: &mut App, lanes: &[usize]) {
 
 #[cfg(test)]
 mod tests {
+    use super::super::ViewKind;
     use super::super::tests::{render, row, sample_app};
-    use super::super::{GUTTER, ViewKind};
     use super::*;
 
     #[test]
     fn cells_shade_by_working_share() {
-        // Idle from 0, working 2000..5000, blocked from 5000; now 8500; 1 s buckets.
+        // Idle from 0, working 2000..5000, blocked from 5000; now 8500; 1 s buckets, now in the last
+        // of 27 cells from column 33, so the lane opens at column 51.
         let mut app = sample_app(ViewKind::Heat, Orient::Horizontal);
-        let buf = render(&mut app, GUTTER + 12, 5);
-        assert_eq!(row(&buf, 2, GUTTER, GUTTER + 12), "█████████", "one cell per second up to now");
-        let fg = |i: u16| buf[(GUTTER + i, 2)].fg;
+        let buf = render(&mut app, 60, 3);
+        assert_eq!(row(&buf, 2, 51, 60), "█████████", "one cell per second up to now");
+        let fg = |i: u16| buf[(51 + i, 2)].fg;
         assert_eq!(fg(0), theme().heat_color(0.0), "idle");
         assert_eq!(fg(3), theme().heat_color(1.0), "working the whole second");
         assert_eq!(fg(6), theme().heat_blocked, "blocked");

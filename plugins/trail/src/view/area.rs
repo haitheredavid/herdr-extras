@@ -7,12 +7,14 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
-use super::time::{AXIS_W, start_ms};
+use super::time::start_ms;
 use super::{App, AreaMode, Orient, put_str, time_ticks, truncate};
 use crate::model::{HISTORY_MS, Lane};
 use crate::theme::{mix, theme};
 use crate::usage::{Tracker, fmt_tokens};
 
+/// ↕ time-axis gutter: `HH:MM:SS` plus a space.
+const AXIS_W: u16 = 9;
 /// ↔ value-axis gutter (`530k `) and end-label margin.
 const VAX_W: u16 = 6;
 const LABEL_W: u16 = 14;
@@ -123,7 +125,7 @@ impl Plot {
 /// history (capped at `HISTORY_MS`) across the whole time axis; otherwise TIME's buckets apply.
 fn time_frame(app: &App, lanes: &[usize], t_dots: usize, dots_per_cell: usize) -> (i64, i64) {
     let now = app.now_ms;
-    if app.area_fit && app.follow {
+    if app.bucket_auto && app.follow {
         let earliest = lanes
             .iter()
             .map(|&i| {
@@ -137,7 +139,7 @@ fn time_frame(app: &App, lanes: &[usize], t_dots: usize, dots_per_cell: usize) -
         return (earliest, dot_ms);
     }
     let bucket = app.bucket_ms();
-    let start = start_ms(app, lanes, bucket, t_dots / dots_per_cell);
+    let start = start_ms(app, bucket, t_dots / dots_per_cell);
     (start, (bucket / dots_per_cell as i64).max(1))
 }
 
@@ -440,12 +442,12 @@ mod tests {
         assert_eq!(nice_ceil(0), 0);
     }
 
-    /// Body is rows 1..=10 of a 13-row frame: legend row 1, chart rows 2..=9 (32 value dots), time
+    /// Body is rows 1..=10 of an 11-row frame: legend row 1, chart rows 2..=9 (32 value dots), time
     /// axis row 10.
     #[test]
     fn stacked_series_sit_on_each_other() {
         let mut app = two_series(Orient::Horizontal);
-        let buf = render(&mut app, 60, 13);
+        let buf = render(&mut app, 60, 11);
         let x = VAX_W + 2;
         // max 400 over 31 dots: lane 0's top at dot 8 (row 7), the total at dot 31 (row 2).
         assert!(braille(buf[(x, 2)].symbol()), "total line on the top row");
@@ -463,7 +465,7 @@ mod tests {
         let mut app = two_series(Orient::Horizontal);
         app.on_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
         assert_eq!(app.area_mode, AreaMode::Overlaid);
-        let buf = render(&mut app, 60, 13);
+        let buf = render(&mut app, 60, 11);
         let x = VAX_W + 2;
         // max 300: lane 1's line on top, lane 0's at a third. Below lane 0's line both areas
         // overlap, lane 0's tint over lane 1's; above it only lane 1's.
@@ -484,7 +486,7 @@ mod tests {
             app.on_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
         }
         assert_eq!(app.area_mode, AreaMode::Stream);
-        let buf = render(&mut app, 60, 13);
+        let buf = render(&mut app, 60, 11);
         let x = VAX_W + 2;
         assert!(braille(buf[(x, 9)].symbol()) && buf[(x, 9)].fg == theme().agent_color(0), "baseline outline at dot 0");
         assert!(braille(buf[(x, 7)].symbol()) && buf[(x, 7)].fg == theme().agent_color(0), "lane 0's upper edge at dot 8");
@@ -498,12 +500,12 @@ mod tests {
     #[test]
     fn fit_spreads_history_across_the_axis() {
         let mut app = two_series(Orient::Horizontal);
-        let buf = render(&mut app, 60, 13);
+        let buf = render(&mut app, 60, 11);
         // 8.5 s over 80 dots: the 1 s floor applies, so lines end around dot 8 (cell 4).
         let last = (VAX_W..60).rev().find(|&x| braille(buf[(x, 2)].symbol())).unwrap();
         assert_eq!(last, VAX_W + 4);
         app.now_ms = 200_000;
-        let buf = render(&mut app, 60, 13);
+        let buf = render(&mut app, 60, 11);
         let last = (VAX_W..60 - LABEL_W).rev().find(|&x| braille(buf[(x, 2)].symbol())).unwrap();
         assert!(last >= 60 - LABEL_W - 2, "a long history reaches the right edge, got {last}");
     }
@@ -511,7 +513,7 @@ mod tests {
     #[test]
     fn vertical_values_grow_rightward() {
         let mut app = two_series(Orient::Vertical);
-        let buf = render(&mut app, AXIS_W + 8, 12);
+        let buf = render(&mut app, AXIS_W + 8, 11);
         // Chart row 3 (first time row): lane 0's fill at the left, lane 1's line at the right.
         assert_eq!(buf[(AXIS_W, 3)].bg, fill_color(0));
         let right = (AXIS_W..AXIS_W + 8).rev().find(|&x| braille(buf[(x, 3)].symbol())).unwrap();

@@ -6,6 +6,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 
+use super::gutter::fmt_cost;
 use super::{App, fmt_dur, put_str, status_glyph, truncate};
 use crate::model::{HISTORY_MS, status_time};
 use crate::theme::theme;
@@ -69,7 +70,7 @@ pub fn render(buf: &mut Buffer, body: Rect, app: &mut App, lanes: &[usize]) {
     put_str(buf, body, x_name, y0, "agent", dim);
     put_str(buf, body, x_ws, y0, "workspace", dim);
     if spark_w > 0 {
-        put_str(buf, body, x_spark, y0, &format!("context, last {}", fmt_dur(HISTORY_MS)), dim);
+        put_str(buf, body, x_spark, y0, &format!("context {}h", HISTORY_MS / 3_600_000), dim);
     }
     put_str(buf, body, x_ctx, y0, "  ctx", dim);
     put_str(buf, body, x_work, y0, "working", dim);
@@ -84,6 +85,8 @@ pub fn render(buf: &mut Buffer, body: Rect, app: &mut App, lanes: &[usize]) {
     } else if rows > 0 && sel >= app.lane_scroll + rows {
         app.lane_scroll = sel + 1 - rows;
     }
+    let shown = rows.min(lanes.len().saturating_sub(app.lane_scroll));
+    app.shown = (app.lane_scroll, shown, lanes.len().saturating_sub(app.lane_scroll + shown));
     for (row, (k, &li)) in lanes.iter().enumerate().skip(app.lane_scroll).take(rows).enumerate() {
         let lane = &app.state.lanes[li];
         let y = y0 + 1 + row as u16;
@@ -114,7 +117,7 @@ pub fn render(buf: &mut Buffer, body: Rect, app: &mut App, lanes: &[usize]) {
             put_str(buf, body, x_spark, y, &spark, Style::new().fg(color));
         }
 
-        let ctx = app.usage.ctx_at(&lane.sessions, end).map_or("-".into(), fmt_tokens);
+        let ctx = app.usage.ctx_at(&lane.sessions, end).map_or("–".into(), fmt_tokens);
         put_str(buf, body, x_ctx, y, &format!("{ctx:>5}"), Style::new());
 
         let st = status_time(lane, from, now);
@@ -123,7 +126,9 @@ pub fn render(buf: &mut Buffer, body: Rect, app: &mut App, lanes: &[usize]) {
         put_str(buf, body, x_work + BAR_W as u16, y, &format!("{:>4}%", (share * 100.0).round() as u32), Style::new());
 
         let (reqs, cost) = app.usage.spend_between(&lane.sessions, from, now);
-        put_str(buf, body, x_cost, y, &format!("{:>8}", format!("${cost:.2}")), Style::new());
+        let has_usage = app.usage.has_samples(&lane.sessions);
+        put_str(buf, body, x_cost, y, &format!("{:>8}", fmt_cost(has_usage.then_some(cost))), Style::new());
+        let reqs = if has_usage { reqs.to_string() } else { "–".into() };
         put_str(buf, body, x_req, y, &format!("{reqs:>5}"), Style::new());
 
         let state = match lane.closed_ms {
@@ -165,6 +170,6 @@ mod tests {
         assert!(line.contains("150k"), "{line}");
         assert!(line.contains("██▉ ") && line.contains("35%"), "{line}");
         assert!(line.contains("$1.25") && line.contains("    2 "), "{line}");
-        assert!(line.contains("blocked 0m3s"), "{line}");
+        assert!(line.contains("blocked 3s"), "{line}");
     }
 }

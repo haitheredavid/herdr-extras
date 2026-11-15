@@ -51,25 +51,29 @@ fn pts(lane: &Lane, usage: &Tracker, scale: Scale, now_ms: i64, n: usize, seq_ba
     out
 }
 
-pub fn render(buf: &mut Buffer, body: Rect, app: &mut App, lanes: &[usize], scale: Scale) {
-    let grid = Grid { orient: app.orient, body, lead: 0, band: scale.band };
+pub fn render(buf: &mut Buffer, body: Rect, app: &mut App, lanes: &[usize]) {
+    let scale = Scale::of(app, lanes, body.height);
+    if scale.band > 1 {
+        app.band_max = Some(scale.max);
+    }
+    let grid = Grid::new(app.orient, body, 0, scale.band, lanes.len());
     let (back, orient, now) = (app.seq_back, app.orient, app.now_ms);
     grid.draw_lanes(buf, app, lanes, |lane, usage, n| pts(lane, usage, scale, now, n, back, orient));
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::ViewKind;
     use super::super::tests::{render, row, sample_app};
-    use super::super::{GUTTER, ViewKind};
     use super::*;
     use crate::model::{AgentStatus, Mark};
 
     #[test]
     fn horizontal_steps_are_evenly_spaced() {
         let mut app = sample_app(ViewKind::Sequence, Orient::Horizontal);
-        // Header, lane row, detail, footer: no axis row.
-        let buf = render(&mut app, GUTTER + 20, 4);
-        assert_eq!(row(&buf, 1, GUTTER, GUTTER + 20), "◆───●━━━▲╍╍╍▸");
+        // Header, lane row: no axis row. The strip starts at column 33.
+        let buf = render(&mut app, 60, 4);
+        assert_eq!(row(&buf, 1, 33, 60), "◆───●━━━▲╍╍╍▸");
     }
 
     #[test]
@@ -79,8 +83,8 @@ mod tests {
             let s = if k % 2 == 0 { AgentStatus::Idle } else { AgentStatus::Working };
             app.state.set_status(0, s, 6000 + k);
         }
-        let buf = render(&mut app, GUTTER + 12, 4);
-        let lane = row(&buf, 1, GUTTER, GUTTER + 12);
+        let buf = render(&mut app, 60, 4);
+        let lane = row(&buf, 1, 33, 60);
         assert!(lane.starts_with('…'), "{lane}");
         assert!(lane.ends_with('▸'), "{lane}");
     }
@@ -89,12 +93,13 @@ mod tests {
     fn seq_back_and_close_end_the_lane_at_a_node() {
         let mut app = sample_app(ViewKind::Sequence, Orient::Horizontal);
         app.seq_back = 1;
-        let buf = render(&mut app, GUTTER + 20, 4);
-        assert_eq!(row(&buf, 1, GUTTER, GUTTER + 20), "◆───●━━━", "last step hidden, no head");
+        let buf = render(&mut app, 60, 4);
+        assert_eq!(row(&buf, 1, 33, 60), "◆───●━━━", "last step hidden, no head");
 
         app.seq_back = 0;
         app.state.close("w1:p1", Mark::Closed, 9000);
-        let buf = render(&mut app, GUTTER + 20, 4);
-        assert_eq!(row(&buf, 1, GUTTER, GUTTER + 20), "◆───●━━━▲╍╍╍✕");
+        app.query.show_closed = true;
+        let buf = render(&mut app, 60, 4);
+        assert_eq!(row(&buf, 1, 33, 60), "◆───●━━━▲╍╍╍✕");
     }
 }
