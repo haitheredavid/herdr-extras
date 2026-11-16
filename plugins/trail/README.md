@@ -11,10 +11,10 @@ A [herdr](https://herdr.dev) plugin that shows what every agent pane has been do
 ## Install
 
 ```
-herdr plugin install haitheredavid/herdr-extras/plugins/trail --ref trail-v0.1.0
+herdr plugin install haitheredavid/herdr-extras/plugins/trail --ref trail-v0.1.1
 ```
 
-The install step downloads the binary for your platform from the `trail-v0.1.0` release, checks it against the release's `SHA256SUMS`, and falls back to `cargo build --release` when there is no binary for your machine or the download fails. Updating is reinstalling.
+The install step downloads the binary for your platform from the `trail-v0.1.1` release, checks it against the release's `SHA256SUMS`, and falls back to `cargo build --release` when there is no binary for your machine or the download fails. Updating is reinstalling.
 
 ## Keybinding
 

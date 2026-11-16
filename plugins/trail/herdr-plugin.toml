@@ -1,6 +1,6 @@
 id = "herdr-trail"
 name = "Trail"
-version = "0.1.0"
+version = "0.1.1"
 min_herdr_version = "0.9.5"
 description = "Agent activity timeline for herdr: state, context and cost per agent, and a step-through session timeline"
 platforms = ["macos", "linux"]

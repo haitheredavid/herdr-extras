@@ -4,6 +4,22 @@ All notable changes to trail are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2026-11-16
+
+### Fixed
+
+- Codex timelines show the prompt of each turn in newer Codex session files (`UserMessage` items), not just `turn N`.
+- A Codex turn's first request is listed under its own turn instead of before it.
+- Builds pass clippy on current stable Rust.
+
+### Documentation
+
+- Usage and the timeline need herdr's integration for each agent; troubleshooting for lanes that stay status-only.
+
+### Known issues
+
+- Codex lanes can stay status-only with recent Codex releases: Codex runs its session hooks from a background process, so herdr's integration reports the session for the wrong pane and herdr never learns it. See the README's troubleshooting section.
+
 ## [0.1.0] - 2026-11-14
 
 First release as `herdr-trail` (formerly `track`).
@@ -29,7 +45,3 @@ First release as `herdr-trail` (formerly `track`).
 
 - Renamed the plugin from `track` to `trail` (id `herdr-trail`).
 - The band follows focus into the tab you switch to, keeping its view.
-
-### Known issues
-
-- Codex lanes can stay status-only with recent Codex releases: Codex runs its session hooks from a background process, so herdr's integration reports the session for the wrong pane and herdr never learns it. See the README's troubleshooting section.

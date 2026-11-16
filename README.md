@@ -11,7 +11,7 @@ Personal [herdr](https://herdr.dev) TUI plugins, one subdirectory per plugin, ea
 Each plugin's README has its install command and options. For trail:
 
 ```
-herdr plugin install haitheredavid/herdr-extras/plugins/trail --ref trail-v0.1.0
+herdr plugin install haitheredavid/herdr-extras/plugins/trail --ref trail-v0.1.1
 ```
 
 ## Layout
